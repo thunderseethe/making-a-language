@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 ena = "0.14.2"
 im = "15.1"
+itertools = "0.12.0"
