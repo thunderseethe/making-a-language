@@ -1,14 +1,10 @@
-[workspace]
-members = ["base"]
-
-[workspace.dependencies]
-ena = "0.14.2"
-im = "15.1"
-
 [package]
-name = "type-inference"
+name = "base"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[dependencies]
+ena.workspace = true
+im.workspace = true
