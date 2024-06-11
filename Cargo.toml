@@ -1,12 +1,14 @@
 [workspace]
 members = [
   "base",
-  "rows"
+  "items",
+  "rows", 
 ]
 
 [workspace.dependencies]
 ena = "0.14.2"
 im = "15.1"
+pretty_assertions = "1.4"
 
 [package]
 name = "type-inference"

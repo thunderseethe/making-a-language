@@ -160,7 +160,7 @@ impl TypeInference {
             arg_out
               .constraints
               .into_iter()
-              .chain(fun_out.constraints.into_iter())
+              .chain(fun_out.constraints)
               .collect(),
             Expr::app(fun_out.typed_ast, arg_out.typed_ast),
           ),
