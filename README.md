@@ -7,4 +7,4 @@ Right now there's two stages in the typechecker:
 
 * [base](/base) - The initial base type checker.
 * [rows](/rows) - Extends base with support for datatypes via row types.
-
+* [items](/items) - Extends rows with support for checking top level functions.
