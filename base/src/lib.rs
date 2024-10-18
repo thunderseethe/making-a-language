@@ -174,8 +174,12 @@ impl TypeInference {
     match (ast, ty) {
       (Expr::Int(i), Type::Int) => GenOut::new(vec![], Expr::Int(i)),
       (Expr::Fun(arg, body), Type::Fun(arg_ty, ret_ty)) => {
-        let env = env.update(arg, *arg_ty);
-        self.check(env, *body, *ret_ty)
+        let env = env.update(arg, *arg_ty.clone());
+        let body_out = self.check(env, *body, *ret_ty);
+        GenOut {
+          typed_ast: Expr::fun(TypedVar(arg, *arg_ty), body_out.typed_ast),
+          ..body_out
+        }
       }
       (ast, expected_ty) => {
         let (mut out, actual_ty) = self.infer(env, ast);

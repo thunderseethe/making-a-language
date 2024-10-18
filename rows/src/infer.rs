@@ -211,13 +211,13 @@ impl TypeInference {
     match (ast, ty) {
       (Ast::Int(i), Type::Int) => InferOut::new(vec![], Ast::Int(i)),
       (Ast::Fun(arg, body), Type::Fun(arg_ty, ret_ty)) => {
-        let env = env.update(arg, *arg_ty);
-        self.check(env, *body, *ret_ty)
+        let env = env.update(arg, *arg_ty.clone());
+        self.check(env, *body, *ret_ty).with_typed_ast(|body| Ast::fun(TypedVar(arg, *arg_ty), body))
       }
       (Ast::Label(ast_lbl, term), Type::Label(ty_lbl, ty)) if ast_lbl == ty_lbl => {
-        self.check(env, *term, *ty)
+        self.check(env, *term, *ty).with_typed_ast(|term| Ast::label(ast_lbl, term))
       }
-      (Ast::Unlabel(term, lbl), ty) => self.check(env, *term, Type::label(lbl, ty)),
+      (Ast::Unlabel(term, lbl), ty) => self.check(env, *term, Type::label(lbl.clone(), ty)).with_typed_ast(|term| Ast::unlabel(term, lbl)),
       (ast @ Ast::Concat(_, _), Type::Label(lbl, ty))
       | (ast @ Ast::Project(_, _), Type::Label(lbl, ty)) => {
         // Cast a singleton row into a product
