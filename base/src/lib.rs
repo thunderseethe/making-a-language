@@ -12,18 +12,18 @@ struct TypedVar(Var, Type);
 /// Our Abstract syntax tree
 /// The lambda calculus + integer literals.
 #[derive(Debug, PartialEq, Eq)]
-enum Expr<V> {
+enum Ast<V> {
   /// A local variable
   Var(V),
   /// An integer literal
   Int(isize),
   /// A function literal (lambda, closure).
-  Fun(V, Box<Expr<V>>),
+  Fun(V, Box<Ast<V>>),
   /// Function application
-  App(Box<Expr<V>>, Box<Expr<V>>),
+  App(Box<Ast<V>>, Box<Ast<V>>),
 }
 
-impl<V> Expr<V> {
+impl<V> Ast<V> {
   fn fun(arg: V, body: Self) -> Self {
     Self::Fun(arg, Box::new(body))
   }
@@ -103,11 +103,11 @@ struct TypeInference {
 
 struct GenOut {
   constraints: Vec<Constraint>,
-  typed_ast: Expr<TypedVar>,
+  typed_ast: Ast<TypedVar>,
 }
 
 impl GenOut {
-  fn new(constraints: Vec<Constraint>, typed_ast: Expr<TypedVar>) -> Self {
+  fn new(constraints: Vec<Constraint>, typed_ast: Ast<TypedVar>) -> Self {
     Self {
       constraints,
       typed_ast,
@@ -125,29 +125,29 @@ impl TypeInference {
   /// Infer type of `ast`
   /// Returns a list of constraints that need to be true and the type `ast` will have if
   /// constraints hold.
-  fn infer(&mut self, env: im::HashMap<Var, Type>, ast: Expr<Var>) -> (GenOut, Type) {
+  fn infer(&mut self, env: im::HashMap<Var, Type>, ast: Ast<Var>) -> (GenOut, Type) {
     match ast {
-      Expr::Int(i) => (GenOut::new(vec![], Expr::Int(i)), Type::Int),
-      Expr::Var(v) => {
+      Ast::Int(i) => (GenOut::new(vec![], Ast::Int(i)), Type::Int),
+      Ast::Var(v) => {
         let ty = &env[&v];
         (
-          GenOut::new(vec![], Expr::Var(TypedVar(v, ty.clone()))),
+          GenOut::new(vec![], Ast::Var(TypedVar(v, ty.clone()))),
           ty.clone(),
         )
       }
-      Expr::Fun(arg, body) => {
+      Ast::Fun(arg, body) => {
         let arg_ty_var = self.fresh_ty_var();
         let env = env.update(arg, Type::Var(arg_ty_var));
         let (body_out, body_ty) = self.infer(env, *body);
         (
           GenOut {
-            typed_ast: Expr::fun(TypedVar(arg, Type::Var(arg_ty_var)), body_out.typed_ast),
+            typed_ast: Ast::fun(TypedVar(arg, Type::Var(arg_ty_var)), body_out.typed_ast),
             ..body_out
           },
           Type::fun(Type::Var(arg_ty_var), body_ty),
         )
       }
-      Expr::App(fun, arg) => {
+      Ast::App(fun, arg) => {
         let (arg_out, arg_ty) = self.infer(env.clone(), *arg);
 
         let ret_ty = Type::Var(self.fresh_ty_var());
@@ -162,7 +162,7 @@ impl TypeInference {
               .into_iter()
               .chain(fun_out.constraints)
               .collect(),
-            Expr::app(fun_out.typed_ast, arg_out.typed_ast),
+            Ast::app(fun_out.typed_ast, arg_out.typed_ast),
           ),
           ret_ty,
         )
@@ -170,14 +170,14 @@ impl TypeInference {
     }
   }
 
-  fn check(&mut self, env: im::HashMap<Var, Type>, ast: Expr<Var>, ty: Type) -> GenOut {
+  fn check(&mut self, env: im::HashMap<Var, Type>, ast: Ast<Var>, ty: Type) -> GenOut {
     match (ast, ty) {
-      (Expr::Int(i), Type::Int) => GenOut::new(vec![], Expr::Int(i)),
-      (Expr::Fun(arg, body), Type::Fun(arg_ty, ret_ty)) => {
+      (Ast::Int(i), Type::Int) => GenOut::new(vec![], Ast::Int(i)),
+      (Ast::Fun(arg, body), Type::Fun(arg_ty, ret_ty)) => {
         let env = env.update(arg, *arg_ty.clone());
         let body_out = self.check(env, *body, *ret_ty);
         GenOut {
-          typed_ast: Expr::fun(TypedVar(arg, *arg_ty), body_out.typed_ast),
+          typed_ast: Ast::fun(TypedVar(arg, *arg_ty), body_out.typed_ast),
           ..body_out
         }
       }
@@ -291,27 +291,27 @@ impl TypeInference {
     }
   }
 
-  fn substitute_ast(&mut self, ast: Expr<TypedVar>) -> (HashSet<TypeVar>, Expr<TypedVar>) {
+  fn substitute_ast(&mut self, ast: Ast<TypedVar>) -> (HashSet<TypeVar>, Ast<TypedVar>) {
     match ast {
-      Expr::Var(v) => {
+      Ast::Var(v) => {
         let (unbound, ty) = self.substitute(v.1);
-        (unbound, Expr::Var(TypedVar(v.0, ty)))
+        (unbound, Ast::Var(TypedVar(v.0, ty)))
       }
-      Expr::Int(i) => (HashSet::new(), Expr::Int(i)),
-      Expr::Fun(arg, body) => {
+      Ast::Int(i) => (HashSet::new(), Ast::Int(i)),
+      Ast::Fun(arg, body) => {
         let (mut unbound, ty) = self.substitute(arg.1);
         let arg = TypedVar(arg.0, ty);
 
         let (unbound_body, body) = self.substitute_ast(*body);
         unbound.extend(unbound_body);
 
-        (unbound, Expr::fun(arg, body))
+        (unbound, Ast::fun(arg, body))
       }
-      Expr::App(fun, arg) => {
+      Ast::App(fun, arg) => {
         let (mut unbound_fun, fun) = self.substitute_ast(*fun);
         let (unbound_arg, arg) = self.substitute_ast(*arg);
         unbound_fun.extend(unbound_arg);
-        (unbound_fun, Expr::app(fun, arg))
+        (unbound_fun, Ast::app(fun, arg))
       }
     }
   }
@@ -323,7 +323,7 @@ struct TypeScheme {
   ty: Type,
 }
 
-fn type_infer(ast: Expr<Var>) -> Result<(Expr<TypedVar>, TypeScheme), TypeError> {
+fn type_infer(ast: Ast<Var>) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
   let mut ctx = TypeInference {
     unification_table: InPlaceUnificationTable::default(),
   };
@@ -362,23 +362,23 @@ mod tests {
 
   #[test]
   fn infers_int() {
-    let ast = Expr::Int(3);
+    let ast = Ast::Int(3);
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
-    assert_eq!(ty_chk.0, Expr::Int(3));
+    assert_eq!(ty_chk.0, Ast::Int(3));
     assert_eq!(ty_chk.1.ty, Type::Int);
   }
 
   #[test]
   fn infers_id_fun() {
     let x = Var(0);
-    let ast = Expr::fun(x, Expr::Var(x));
+    let ast = Ast::fun(x, Ast::Var(x));
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
 
     let a = TypeVar(0);
     let typed_x = TypedVar(x, Type::Var(a));
-    assert_eq!(ty_chk.0, Expr::fun(typed_x.clone(), Expr::Var(typed_x)));
+    assert_eq!(ty_chk.0, Ast::fun(typed_x.clone(), Ast::Var(typed_x)));
     assert_eq!(
       ty_chk.1,
       TypeScheme {
@@ -392,7 +392,7 @@ mod tests {
   fn infers_k_combinator() {
     let x = Var(0);
     let y = Var(1);
-    let ast = Expr::fun(x, Expr::fun(y, Expr::Var(x)));
+    let ast = Ast::fun(x, Ast::fun(y, Ast::Var(x)));
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
 
@@ -412,15 +412,15 @@ mod tests {
     let x = Var(0);
     let y = Var(1);
     let z = Var(2);
-    let ast = Expr::fun(
+    let ast = Ast::fun(
       x,
-      Expr::fun(
+      Ast::fun(
         y,
-        Expr::fun(
+        Ast::fun(
           z,
-          Expr::app(
-            Expr::app(Expr::Var(x), Expr::Var(z)),
-            Expr::app(Expr::Var(y), Expr::Var(z)),
+          Ast::app(
+            Ast::app(Ast::Var(x), Ast::Var(z)),
+            Ast::app(Ast::Var(y), Ast::Var(z)),
           ),
         ),
       ),
@@ -445,9 +445,9 @@ mod tests {
   #[test]
   fn type_infer_fails() {
     let x = Var(0);
-    let ast = Expr::app(
-      Expr::fun(x, Expr::app(Expr::Var(x), Expr::Int(3))),
-      Expr::Int(1),
+    let ast = Ast::app(
+      Ast::fun(x, Ast::app(Ast::Var(x), Ast::Int(3))),
+      Ast::Int(1),
     );
 
     let ty_chk_res = type_infer(ast);
