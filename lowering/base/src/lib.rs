@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use std::collections::HashMap;
 use types_base::{self as ast, Ast, TypedVar};
 
