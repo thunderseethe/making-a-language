@@ -1,0 +1,7 @@
+[package]
+name = "lowering-base"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+types-base.workspace = true

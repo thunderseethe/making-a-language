@@ -1,18 +1,18 @@
 #![allow(dead_code)]
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-struct Var(usize);
+pub struct Var(pub usize);
 
 #[derive(PartialEq, Eq, Clone, Debug)]
-struct TypedVar(Var, Type);
+pub struct TypedVar(pub Var, pub Type);
 
 /// Our Abstract syntax tree
 /// The lambda calculus + integer literals.
 #[derive(Debug, PartialEq, Eq)]
-enum Ast<V> {
+pub enum Ast<V> {
   /// A local variable
   Var(V),
   /// An integer literal
@@ -24,11 +24,11 @@ enum Ast<V> {
 }
 
 impl<V> Ast<V> {
-  fn fun(arg: V, body: Self) -> Self {
+  pub fn fun(arg: V, body: Self) -> Self {
     Self::Fun(arg, Box::new(body))
   }
 
-  fn app(fun: Self, arg: Self) -> Self {
+  pub fn app(fun: Self, arg: Self) -> Self {
     Self::App(Box::new(fun), Box::new(arg))
   }
 }
@@ -37,7 +37,7 @@ impl<V> Ast<V> {
 /// Each AST node in our input will be annotated by a value of `Type`
 /// after type inference succeeeds.
 #[derive(PartialEq, Eq, Clone, Debug)]
-enum Type {
+pub enum Type {
   /// Type of integers
   Int,
   /// A type variable, stands for a value of Type
@@ -70,7 +70,7 @@ impl Type {
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-struct TypeVar(u32);
+pub struct TypeVar(u32);
 impl UnifyKey for TypeVar {
   type Value = Option<Type>;
 
@@ -193,7 +193,7 @@ impl TypeInference {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum TypeError {
+pub enum TypeError {
   TypeNotEqual(Type, Type),
   InfiniteType(TypeVar, Type),
 }
@@ -268,15 +268,15 @@ impl TypeInference {
 }
 
 impl TypeInference {
-  fn substitute(&mut self, ty: Type) -> (HashSet<TypeVar>, Type) {
+  fn substitute(&mut self, ty: Type) -> (BTreeSet<TypeVar>, Type) {
     match ty {
-      Type::Int => (HashSet::new(), Type::Int),
+      Type::Int => (BTreeSet::new(), Type::Int),
       Type::Var(v) => {
         let root = self.unification_table.find(v);
         match self.unification_table.probe_value(root) {
           Some(ty) => self.substitute(ty),
           None => {
-            let mut unbound = HashSet::new();
+            let mut unbound = BTreeSet::new();
             unbound.insert(root);
             (unbound, Type::Var(root))
           }
@@ -291,13 +291,13 @@ impl TypeInference {
     }
   }
 
-  fn substitute_ast(&mut self, ast: Ast<TypedVar>) -> (HashSet<TypeVar>, Ast<TypedVar>) {
+  fn substitute_ast(&mut self, ast: Ast<TypedVar>) -> (BTreeSet<TypeVar>, Ast<TypedVar>) {
     match ast {
       Ast::Var(v) => {
         let (unbound, ty) = self.substitute(v.1);
         (unbound, Ast::Var(TypedVar(v.0, ty)))
       }
-      Ast::Int(i) => (HashSet::new(), Ast::Int(i)),
+      Ast::Int(i) => (BTreeSet::new(), Ast::Int(i)),
       Ast::Fun(arg, body) => {
         let (mut unbound, ty) = self.substitute(arg.1);
         let arg = TypedVar(arg.0, ty);
@@ -318,12 +318,12 @@ impl TypeInference {
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
-struct TypeScheme {
-  unbound: HashSet<TypeVar>,
-  ty: Type,
+pub struct TypeScheme {
+  pub unbound: BTreeSet<TypeVar>,
+  pub ty: Type,
 }
 
-fn type_infer(ast: Ast<Var>) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
+pub fn type_infer(ast: Ast<Var>) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
   let mut ctx = TypeInference {
     unification_table: InPlaceUnificationTable::default(),
   };
@@ -354,7 +354,7 @@ mod tests {
 
   macro_rules! set {
         ($($ele:expr),*) => {{
-            let mut tmp = HashSet::new();
+            let mut tmp = BTreeSet::new();
             $(tmp.insert($ele);)*
             tmp
         }};
