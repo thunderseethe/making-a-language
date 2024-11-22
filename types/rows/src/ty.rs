@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use ena::unify::{EqUnifyValue, UnifyKey};
 
@@ -53,7 +53,7 @@ impl ClosedRow {
   }
 
   /// Check if our closed row mentions any of our unbound types or rows.
-  pub fn mentions(&self, unbound_tys: &HashSet<TypeVar>, unbound_rows: &HashSet<RowVar>) -> bool {
+  pub fn mentions(&self, unbound_tys: &BTreeSet<TypeVar>, unbound_rows: &BTreeSet<RowVar>) -> bool {
     for ty in self.values.iter() {
       if ty.mentions(unbound_tys, unbound_rows) {
         return true;
@@ -147,7 +147,7 @@ impl Type {
     }
   }
 
-  pub fn mentions(&self, unbound_tys: &HashSet<TypeVar>, unbound_rows: &HashSet<RowVar>) -> bool {
+  pub fn mentions(&self, unbound_tys: &BTreeSet<TypeVar>, unbound_rows: &BTreeSet<RowVar>) -> bool {
     match self {
       Type::Int => false,
       Type::Var(v) => unbound_tys.contains(v),

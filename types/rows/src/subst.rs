@@ -1,20 +1,20 @@
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 use crate::ast::{Ast, TypedVar};
 use crate::ty::{ClosedRow, Row, RowCombination, RowVar, Type, TypeVar};
 use crate::{Evidence, TypeInference};
 
 pub struct SubstOut<T> {
-  pub unbound_tys: HashSet<TypeVar>,
-  pub unbound_rows: HashSet<RowVar>,
+  pub unbound_tys: BTreeSet<TypeVar>,
+  pub unbound_rows: BTreeSet<RowVar>,
   pub value: T,
 }
 
 impl<T> SubstOut<T> {
   pub(super) fn new(value: T) -> Self {
     Self {
-      unbound_tys: HashSet::default(),
-      unbound_rows: HashSet::default(),
+      unbound_tys: Default::default(),
+      unbound_rows: Default::default(),
       value,
     }
   }
