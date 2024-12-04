@@ -1,19 +1,37 @@
 #![allow(dead_code)]
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use types_base::{self as ast, Ast, TypedVar};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-struct Var(u32);
+struct VarId(u32);
+
+#[derive(Debug, Eq, PartialEq, Clone)]
+struct Var {
+  id: VarId,
+  ty: Type,
+}
+
+impl Var {
+  fn new(id: VarId, ty: Type) -> Self {
+    Self { id, ty }
+  }
+}
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 struct TypeVar(usize);
+
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
+enum Kind {
+  Type,
+}
 
 #[derive(Debug, PartialEq, Eq, Clone)]
 enum Type {
   Int,
   Var(TypeVar),
   Fun(Box<Self>, Box<Self>),
-  Forall(Box<Self>),
+  Forall(Kind, Box<Self>),
 }
 
 impl Type {
@@ -21,38 +39,56 @@ impl Type {
     Self::Fun(Box::new(arg), Box::new(ret))
   }
 
-  fn forall(body: Self) -> Self {
-    Self::Forall(Box::new(body))
+  fn forall(kind: Kind, body: Self) -> Self {
+    Self::Forall(kind, Box::new(body))
+  }
+
+  fn subst_internal(self, ty: Self, needle: usize) -> Self {
+    match self {
+      Type::Int => Type::Int,
+      Type::Var(type_var) => match type_var.0.cmp(&needle) {
+        Ordering::Equal => ty,
+        Ordering::Less => Type::Var(type_var),
+        Ordering::Greater => Type::Var(TypeVar(type_var.0 - 1)),
+      },
+      Type::Fun(arg, ret) => Type::fun(arg.subst(ty.clone()), ret.subst(ty)),
+      Type::Forall(kind, body) => Type::forall(kind, body.subst_internal(ty, needle + 1)),
+    }
+  }
+
+  fn subst(self, ty: Self) -> Self {
+    self.subst_internal(ty, 0)
   }
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum IR {
-  Var(Var, Type),
+  Var(Var),
   Int(isize),
-  Fun(Var, Type, Box<IR>),
-  App(Box<IR>, Box<IR>),
-  TyFun(Box<IR>),
+  Fun(Var, Box<Self>),
+  App(Box<Self>, Box<Self>),
+  TyFun(Kind, Box<Self>),
+  TyApp(Box<Self>, Type),
 }
 
 impl IR {
-  fn fun(var: Var, ty: Type, body: Self) -> Self {
-    Self::Fun(var, ty, Box::new(body))
+  fn fun(var: Var, body: Self) -> Self {
+    Self::Fun(var, Box::new(body))
   }
 
   fn app(fun: Self, arg: Self) -> Self {
     Self::App(Box::new(fun), Box::new(arg))
   }
 
-  fn ty_fun(ir: Self) -> Self {
-    Self::TyFun(Box::new(ir))
+  fn ty_fun(kind: Kind, ir: Self) -> Self {
+    Self::TyFun(kind, Box::new(ir))
   }
 
   fn type_of(&self) -> Type {
     match self {
-      IR::Var(_, ty) => ty.clone(),
+      IR::Var(v) => v.ty.clone(),
       IR::Int(_) => Type::Int,
-      IR::Fun(_, arg_ty, body) => Type::fun(arg_ty.clone(), body.type_of()),
+      IR::Fun(arg, body) => Type::fun(arg.ty.clone(), body.type_of()),
       IR::App(fun, arg) => {
         let Type::Fun(fun_arg_ty, ret_ty) = fun.type_of() else {
           panic!("ICE: IR used non-function type as a function")
@@ -63,7 +99,14 @@ impl IR {
         }
         *ret_ty
       }
-      IR::TyFun(body) => Type::forall(body.type_of()),
+      IR::TyFun(kind, body) => Type::forall(*kind, body.type_of()),
+      IR::TyApp(body, ty) => {
+        let Type::Forall(_, body_ty) = body.type_of() else {
+          panic!("ICE: Type applied to a non-forall IR term");
+        };
+
+        body_ty.subst(ty.clone())
+      }
     }
   }
 }
@@ -71,18 +114,18 @@ impl IR {
 #[derive(Default)]
 struct VarSupply {
   next: u32,
-  cache: HashMap<ast::Var, Var>,
+  cache: HashMap<ast::Var, VarId>,
 }
 
 impl VarSupply {
-  fn supply_for(&mut self, var: ast::Var) -> Var {
+  fn supply_for(&mut self, var: ast::Var) -> VarId {
     self
       .cache
       .entry(var)
       .or_insert_with(|| {
         let ir_var = self.next;
         self.next += 1;
-        Var(ir_var)
+        VarId(ir_var)
       })
       .to_owned()
   }
@@ -90,8 +133,26 @@ impl VarSupply {
 
 type TypeEnv = HashMap<ast::TypeVar, TypeVar>;
 
-fn lower_ty_scheme(scheme: ast::TypeScheme) -> (Type, TypeEnv) {
-  let ty_env: TypeEnv = scheme
+struct LowerTypes {
+  env: TypeEnv,
+}
+
+impl LowerTypes {
+  fn lower_ty(&self, ty: ast::Type) -> Type {
+    match ty {
+      ast::Type::Int => Type::Int,
+      ast::Type::Var(v) => Type::Var(self.env[&v]),
+      ast::Type::Fun(arg, ret) => {
+        let arg = self.lower_ty(*arg);
+        let ret = self.lower_ty(*ret);
+        Type::fun(arg, ret)
+      }
+    }
+  }
+}
+
+fn lower_ty_scheme(scheme: ast::TypeScheme) -> (Type, LowerTypes) {
+  let ty_env = scheme
     .unbound
     .into_iter()
     .rev()
@@ -99,45 +160,49 @@ fn lower_ty_scheme(scheme: ast::TypeScheme) -> (Type, TypeEnv) {
     .map(|(i, tyvar)| (tyvar, TypeVar(i)))
     .collect();
 
-  let lower_ty = (0..ty_env.len()).fold(lower_ty(&ty_env, scheme.ty), |ty, _| Type::forall(ty));
-  (lower_ty, ty_env)
+  let lower = LowerTypes { env: ty_env };
+  let lower_ty = (0..lower.env.len()).fold(lower.lower_ty(scheme.ty), |ty, _| {
+    Type::forall(Kind::Type, ty)
+  });
+  (lower_ty, lower)
 }
 
-fn lower_ty(env: &TypeEnv, ty: ast::Type) -> Type {
-  match ty {
-    ast::Type::Int => Type::Int,
-    ast::Type::Var(v) => Type::Var(env[&v]),
-    ast::Type::Fun(arg, ret) => {
-      let arg = lower_ty(env, *arg);
-      let ret = lower_ty(env, *ret);
-      Type::fun(arg, ret)
-    }
-  }
+struct LowerAst {
+  supply: VarSupply,
+  types: LowerTypes,
 }
 
-fn lower_ast(supply: &mut VarSupply, ty_env: &TypeEnv, ast: Ast<TypedVar>) -> IR {
-  match ast {
-    Ast::Var(TypedVar(var, ty)) => IR::Var(supply.supply_for(var), lower_ty(ty_env, ty)),
-    Ast::Int(i) => IR::Int(i),
-    Ast::Fun(TypedVar(var, ty), body) => {
-      let ir_ty = lower_ty(ty_env, ty);
-      let ir_var = supply.supply_for(var);
-      let ir_body = lower_ast(supply, ty_env, *body);
-      IR::fun(ir_var, ir_ty, ir_body)
-    }
-    Ast::App(fun, arg) => {
-      let ir_fun = lower_ast(supply, ty_env, *fun);
-      let ir_arg = lower_ast(supply, ty_env, *arg);
-      IR::app(ir_fun, ir_arg)
+impl LowerAst {
+  fn lower_ast(&mut self, ast: Ast<TypedVar>) -> IR {
+    match ast {
+      Ast::Var(TypedVar(var, ty)) => IR::Var(Var::new(
+        self.supply.supply_for(var),
+        self.types.lower_ty(ty),
+      )),
+      Ast::Int(i) => IR::Int(i),
+      Ast::Fun(TypedVar(var, ty), body) => {
+        let ir_ty = self.types.lower_ty(ty);
+        let ir_var = self.supply.supply_for(var);
+        let ir_body = self.lower_ast(*body);
+        IR::fun(Var::new(ir_var, ir_ty), ir_body)
+      }
+      Ast::App(fun, arg) => {
+        let ir_fun = self.lower_ast(*fun);
+        let ir_arg = self.lower_ast(*arg);
+        IR::app(ir_fun, ir_arg)
+      }
     }
   }
 }
 
 fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
-  let mut supply = VarSupply::default();
-  let (ir_ty, ty_env) = lower_ty_scheme(scheme);
-  let ir = lower_ast(&mut supply, &ty_env, ast);
-  let ir = (0..ty_env.len()).fold(ir, |ir, _| IR::ty_fun(ir));
+  let (ir_ty, types) = lower_ty_scheme(scheme);
+  let mut lower_ast = LowerAst {
+    supply: VarSupply::default(),
+    types,
+  };
+  let ir = lower_ast.lower_ast(ast);
+  let ir = (0..lower_ast.types.env.len()).fold(ir, |ir, _| IR::ty_fun(Kind::Type, ir));
   (ir, ir_ty)
 }
 
@@ -169,9 +234,9 @@ mod tests {
 
     let (ir, ir_ty) = lower_test(ast);
 
-    let x = Var(0);
     let a = Type::Var(TypeVar(0));
-    assert_eq!(ir, IR::ty_fun(IR::fun(x, a.clone(), IR::Var(x, a))));
+    let x = Var::new(VarId(0), a);
+    assert_eq!(ir, IR::ty_fun(Kind::Type, IR::fun(x.clone(), IR::Var(x))));
     // forall(fun(Var(a), Var(a)))
     assert_eq!(ir_ty, ir.type_of());
   }
@@ -184,23 +249,21 @@ mod tests {
 
     let (ir, ir_ty) = lower_test(ast);
 
-    let x = Var(0);
-    let y = Var(1);
     let a = TypeVar(1);
     let b = TypeVar(0);
+    let x = Var::new(VarId(0), Type::Var(a));
+    let y = Var::new(VarId(1), Type::Var(b));
     assert_eq!(
       ir,
-      IR::ty_fun(IR::ty_fun(IR::fun(
-        x,
-        Type::Var(a),
-        IR::fun(y, Type::Var(b), IR::Var(x, Type::Var(a)))
-      )))
+      IR::ty_fun(
+        Kind::Type,
+        IR::ty_fun(Kind::Type, IR::fun(x.clone(), IR::fun(y, IR::Var(x))))
+      )
     );
     // forall(forall(fun(Var(a), fun(Var(b), Var(a)))))
     assert_eq!(ir_ty, ir.type_of());
   }
 
-  
   #[test]
   fn lower_s_combinator() {
     let x = ast::Var(0);
@@ -222,21 +285,40 @@ mod tests {
 
     let (ir, ir_ty) = lower_test(ast);
 
-    let x = Var(0);
-    let y = Var(1);
-    let z = Var(2);
     let a = TypeVar(2);
     let b = TypeVar(1);
     let c = TypeVar(0);
-    let x_ty = Type::fun(Type::Var(a), Type::fun(Type::Var(b), Type::Var(c)));
-    let y_ty = Type::fun(Type::Var(a), Type::Var(b));
-    let z_ty = Type::Var(a);
-    assert_eq!(ir, 
-        IR::ty_fun(IR::ty_fun(IR::ty_fun(
-          IR::fun(x, x_ty.clone(), IR::fun(y, y_ty.clone(), IR::fun(z, z_ty.clone(), 
-            IR::app(
-              IR::app(IR::Var(x, x_ty), IR::Var(z, z_ty.clone())), 
-              IR::app(IR::Var(y, y_ty), IR::Var(z, z_ty)))))))))); 
+    let x = Var::new(
+      VarId(0),
+      Type::fun(Type::Var(a), Type::fun(Type::Var(b), Type::Var(c))),
+    );
+    let y = Var::new(VarId(1), Type::fun(Type::Var(a), Type::Var(b)));
+    let z = Var::new(VarId(2), Type::Var(a));
+    assert_eq!(
+      ir,
+      IR::ty_fun(
+        Kind::Type,
+        IR::ty_fun(
+          Kind::Type,
+          IR::ty_fun(
+            Kind::Type,
+            IR::fun(
+              x.clone(),
+              IR::fun(
+                y.clone(),
+                IR::fun(
+                  z.clone(),
+                  IR::app(
+                    IR::app(IR::Var(x), IR::Var(z.clone())),
+                    IR::app(IR::Var(y), IR::Var(z))
+                  )
+                )
+              )
+            )
+          )
+        )
+      )
+    );
     // forall(forall(forall(fun(fun(Var(a), fun(Var(b), Var(c))), fun(fun(Var(a), Var(b)), fun(Var(a), Var(c)))))))
     assert_eq!(ir_ty, ir.type_of());
   }

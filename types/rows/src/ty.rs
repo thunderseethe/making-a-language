@@ -4,7 +4,7 @@ use ena::unify::{EqUnifyValue, UnifyKey};
 
 use crate::ast::Label;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClosedRow {
   pub fields: Vec<Label>,
   pub values: Vec<Type>,
@@ -64,7 +64,7 @@ impl ClosedRow {
 }
 impl EqUnifyValue for ClosedRow {}
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Row {
   Open(RowVar),
   Closed(ClosedRow),
@@ -95,7 +95,7 @@ impl Row {
 /// Our type
 /// Each AST node in our input will be annotated by a value of `Type`
 /// after type inference succeeeds.
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Hash)]
 pub enum Type {
   /// Type of integers
   Int,

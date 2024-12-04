@@ -3,7 +3,7 @@ use crate::ty::Type;
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 pub struct Var(pub usize);
 
-#[derive(PartialEq, Eq, Clone, Debug)]
+#[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct TypedVar(pub Var, pub Type);
 
 /// Our labels are strings, but we could imagine in a production grade compiler labels would be
@@ -12,7 +12,7 @@ pub type Label = String;
 
 /// Direction of our row for Project and Inject.
 /// Determines where our value shows up in our row combination (in the left or right slot).
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub enum Direction {
   Left,
   Right,
@@ -20,7 +20,7 @@ pub enum Direction {
 
 /// Our Abstract syntax tree
 /// The lambda calculus + integer literals.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum Ast<V> {
   /// A local variable
   Var(V),

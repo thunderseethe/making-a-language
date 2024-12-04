@@ -1,11 +1,11 @@
 #![allow(dead_code)]
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use ena::unify::InPlaceUnificationTable;
 
-use self::ast::{Ast, TypedVar, Var};
+pub use self::ast::{Ast, Direction, TypedVar, Var};
 use self::subst::SubstOut;
-use self::ty::{Row, RowCombination, RowVar, Type, TypeVar};
+pub use self::ty::{ClosedRow, Row, RowCombination, RowVar, Type, TypeVar};
 use self::unification::TypeError;
 
 mod ast;
@@ -29,26 +29,30 @@ pub struct TypeInference {
   unification_table: InPlaceUnificationTable<TypeVar>,
   row_unification_table: InPlaceUnificationTable<RowVar>,
   partial_row_combs: BTreeSet<RowCombination>,
+  ast_to_row_comb: HashMap<Ast<TypedVar>, (RowCombination, Type)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Evidence {
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Evidence {
   RowEquation { left: Row, right: Row, goal: Row },
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
-struct TypeScheme {
-  unbound_rows: BTreeSet<RowVar>,
-  unbound_tys: BTreeSet<TypeVar>,
-  evidence: Vec<Evidence>,
-  ty: Type,
+pub struct TypeScheme {
+  pub unbound_rows: BTreeSet<RowVar>,
+  pub unbound_tys: BTreeSet<TypeVar>,
+  pub evidence: Vec<Evidence>,
+  pub ty: Type,
 }
 
-fn type_infer(ast: Ast<Var>) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
+type TypeInferOut = (Ast<TypedVar>, TypeScheme, HashMap<Ast<TypedVar>, (Evidence, Type)>);
+
+pub fn type_infer(ast: Ast<Var>) -> Result<TypeInferOut, TypeError> {
   let mut ctx = TypeInference {
     unification_table: InPlaceUnificationTable::default(),
     row_unification_table: InPlaceUnificationTable::default(),
     partial_row_combs: BTreeSet::default(),
+    ast_to_row_comb: HashMap::default(),
   };
 
   // Constraint generation
@@ -133,6 +137,19 @@ fn type_infer(ast: Ast<Var>) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
     })
     .collect();
 
+  let ast_to_row_comb = std::mem::take(&mut ctx.ast_to_row_comb)
+    .into_iter()
+    .map(|(key, (row_combo, ty))| {
+      let out = ctx
+        .substitute_ast(key)
+        .merge(ctx.substitute_row_comb(row_combo), |k, v| (k, v))
+        .merge(ctx.substitute_ty(ty), |(k, combo), ty| (k, (combo, ty)));
+      ev_out.unbound_tys.extend(out.unbound_tys);
+      ev_out.unbound_rows.extend(out.unbound_rows);
+      out.value
+    })
+    .collect();
+
   let subst_out = subst_out.merge(ev_out, |l, _| l);
   // Return our typed ast and it's type scheme
   Ok((
@@ -143,6 +160,7 @@ fn type_infer(ast: Ast<Var>) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
       evidence,
       ty: subst_out.value.0,
     },
+    ast_to_row_comb,
   ))
 }
 
