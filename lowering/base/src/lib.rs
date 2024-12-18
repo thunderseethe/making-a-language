@@ -131,10 +131,8 @@ impl VarSupply {
   }
 }
 
-type TypeEnv = HashMap<ast::TypeVar, TypeVar>;
-
 struct LowerTypes {
-  env: TypeEnv,
+  env: HashMap<ast::TypeVar, TypeVar>,
 }
 
 impl LowerTypes {
