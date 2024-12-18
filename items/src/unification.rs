@@ -103,7 +103,7 @@ impl TypeInference {
       }
       Type::Unifier(v) => match self.unification_table.probe_value(v) {
         Some(ty) => self.normalize_ty(ty),
-        None => Type::Unifier(v),
+        None => Type::Unifier(self.unification_table.find(v)),
       },
       Type::Label(label, ty) => {
         let ty = self.normalize_ty(*ty);
