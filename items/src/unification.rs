@@ -46,7 +46,7 @@ impl TypeInference {
       Row::Unifier(var) => match self.row_unification_table.probe_value(var) {
         Some(Row::Closed(closed)) => Row::Closed(self.normalize_closed_row(closed)),
         Some(row) => row,
-        None => row,
+        None => Row::Unifier(self.row_unification_table.find(var)),
       },
       Row::Open(var) => Row::Open(var),
       Row::Closed(closed) => Row::Closed(self.normalize_closed_row(closed)),
