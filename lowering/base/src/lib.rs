@@ -31,7 +31,7 @@ enum Type {
   Int,
   Var(TypeVar),
   Fun(Box<Self>, Box<Self>),
-  Forall(Kind, Box<Self>),
+  TyFun(Kind, Box<Self>),
 }
 
 impl Type {
@@ -40,7 +40,7 @@ impl Type {
   }
 
   fn forall(kind: Kind, body: Self) -> Self {
-    Self::Forall(kind, Box::new(body))
+    Self::TyFun(kind, Box::new(body))
   }
 
   fn subst_internal(self, ty: Self, needle: usize) -> Self {
@@ -52,7 +52,7 @@ impl Type {
         Ordering::Greater => Type::Var(TypeVar(type_var.0 - 1)),
       },
       Type::Fun(arg, ret) => Type::fun(arg.subst(ty.clone()), ret.subst(ty)),
-      Type::Forall(kind, body) => Type::forall(kind, body.subst_internal(ty, needle + 1)),
+      Type::TyFun(kind, body) => Type::forall(kind, body.subst_internal(ty, needle + 1)),
     }
   }
 
@@ -101,7 +101,7 @@ impl IR {
       }
       IR::TyFun(kind, body) => Type::forall(*kind, body.type_of()),
       IR::TyApp(body, ty) => {
-        let Type::Forall(_, body_ty) = body.type_of() else {
+        let Type::TyFun(_, body_ty) = body.type_of() else {
           panic!("ICE: Type applied to a non-forall IR term");
         };
 
