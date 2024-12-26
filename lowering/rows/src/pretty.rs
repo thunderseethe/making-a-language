@@ -44,7 +44,7 @@ impl Type {
 
   fn collect_forall_kinds(self, expected_kind: Kind, kinds: &mut Vec<Kind>) -> Type {
     match self {
-      Type::Forall(kind, ty) if kind == expected_kind => {
+      Type::TyFun(kind, ty) if kind == expected_kind => {
         kinds.push(kind);
         ty.collect_forall_kinds(expected_kind, kinds)
       }
@@ -80,7 +80,7 @@ where
         ret.collect_fun_tys_into(&mut tys);
         a.intersperse(tys.into_iter().map(|ty| ty.pretty(a)), " -> ")
       }
-      Type::Forall(kind, ty) => {
+      Type::TyFun(kind, ty) => {
         let mut kinds = vec![kind];
         let ty = ty.collect_forall_kinds(kind, &mut kinds);
         a.text("forall")

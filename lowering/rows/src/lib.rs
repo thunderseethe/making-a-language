@@ -34,7 +34,7 @@ enum Type {
   Int,
   Var(TypeVar),
   Fun(Box<Self>, Box<Self>),
-  Forall(Kind, Box<Self>),
+  TyFun(Kind, Box<Self>),
   Prod(Vec<Self>),
   Sum(Vec<Self>),
 }
@@ -51,8 +51,8 @@ impl Type {
       .rfold(ret, |ret, arg| Self::Fun(Box::new(arg), Box::new(ret)))
   }
 
-  fn forall(kind: Kind, body: Self) -> Self {
-    Self::Forall(kind, Box::new(body))
+  fn ty_fun(kind: Kind, body: Self) -> Self {
+    Self::TyFun(kind, Box::new(body))
   }
 
   fn prod(elems: Vec<Self>) -> Self
@@ -81,7 +81,7 @@ impl Type {
         Ordering::Greater => Type::Var(TypeVar(type_var.0 - 1)),
       },
       Type::Fun(arg, ret) => Type::fun(arg.subst(ty.clone()), ret.subst(ty)),
-      Type::Forall(kind, body) => Type::forall(kind, body.subst_internal(ty, needle + 1)),
+      Type::TyFun(kind, body) => Type::ty_fun(kind, body.subst_internal(ty, needle + 1)),
       Type::Prod(elems) => Type::prod(
         elems
           .into_iter()
@@ -199,9 +199,9 @@ impl IR {
         }
         *ret_ty
       }
-      IR::TyFun(kind, body) => Type::forall(*kind, body.type_of()),
+      IR::TyFun(kind, body) => Type::ty_fun(*kind, body.type_of()),
       IR::TyApp(body, ty) => {
-        let Type::Forall(_, body_ty) = body.type_of() else {
+        let Type::TyFun(_, body_ty) = body.type_of() else {
           panic!("ICE: Type applied to a non-forall IR term");
         };
 
@@ -307,7 +307,7 @@ impl Type {
         arg.adjust(cutoff);
         ret.adjust(cutoff);
       }
-      Type::Forall(_, body) => {
+      Type::TyFun(_, body) => {
         body.adjust(cutoff + 1);
       }
       Type::Prod(elems) | Type::Sum(elems) => elems.iter_mut().for_each(|ty| ty.adjust(cutoff)),
@@ -382,7 +382,7 @@ impl LowerTypes {
         let concat = Type::funs([left_prod.clone(), right_prod.clone()], goal_prod.clone());
         let branch = {
           let a = TypeVar(0);
-          Type::forall(
+          Type::ty_fun(
             Kind::Type,
             Type::funs(
               [
@@ -437,7 +437,7 @@ fn lower_ty_scheme(scheme: ast::TypeScheme) -> (Type, Vec<Kind>, LowerTypes) {
   );
   let lower_ty = kinds
     .iter()
-    .fold(lower_ty, |ty, kind| Type::forall(*kind, ty));
+    .fold(lower_ty, |ty, kind| Type::ty_fun(*kind, ty));
   (lower_ty, kinds, lower)
 }
 
