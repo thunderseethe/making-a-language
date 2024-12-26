@@ -39,7 +39,7 @@ impl Type {
     Self::Fun(Box::new(arg), Box::new(ret))
   }
 
-  fn forall(kind: Kind, body: Self) -> Self {
+  fn ty_fun(kind: Kind, body: Self) -> Self {
     Self::TyFun(kind, Box::new(body))
   }
 
@@ -52,7 +52,7 @@ impl Type {
         Ordering::Greater => Type::Var(TypeVar(type_var.0 - 1)),
       },
       Type::Fun(arg, ret) => Type::fun(arg.subst(ty.clone()), ret.subst(ty)),
-      Type::TyFun(kind, body) => Type::forall(kind, body.subst_internal(ty, needle + 1)),
+      Type::TyFun(kind, body) => Type::ty_fun(kind, body.subst_internal(ty, needle + 1)),
     }
   }
 
@@ -99,7 +99,7 @@ impl IR {
         }
         *ret_ty
       }
-      IR::TyFun(kind, body) => Type::forall(*kind, body.type_of()),
+      IR::TyFun(kind, body) => Type::ty_fun(*kind, body.type_of()),
       IR::TyApp(body, ty) => {
         let Type::TyFun(_, body_ty) = body.type_of() else {
           panic!("ICE: Type applied to a non-forall IR term");
@@ -160,7 +160,7 @@ fn lower_ty_scheme(scheme: ast::TypeScheme) -> (Type, LowerTypes) {
 
   let lower = LowerTypes { env: ty_env };
   let lower_ty = (0..lower.env.len()).fold(lower.lower_ty(scheme.ty), |ty, _| {
-    Type::forall(Kind::Type, ty)
+    Type::ty_fun(Kind::Type, ty)
   });
   (lower_ty, lower)
 }
