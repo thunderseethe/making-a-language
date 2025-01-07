@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use types_base::{self as ast, Ast, TypedVar};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-struct VarId(u32);
+struct VarId(usize);
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 struct Var {
@@ -93,19 +93,18 @@ impl IR {
         let Type::Fun(fun_arg_ty, ret_ty) = fun.type_of() else {
           panic!("ICE: IR used non-function type as a function")
         };
-        let arg_ty = arg.type_of();
-        if arg_ty != *fun_arg_ty {
+        if arg.type_of() != *fun_arg_ty {
           panic!("ICE: Function applied to wrong argument type");
         }
         *ret_ty
       }
       IR::TyFun(kind, body) => Type::ty_fun(*kind, body.type_of()),
-      IR::TyApp(body, ty) => {
-        let Type::TyFun(_, body_ty) = body.type_of() else {
+      IR::TyApp(ty_fun, ty) => {
+        let Type::TyFun(_, ret_ty) = ty_fun.type_of() else {
           panic!("ICE: Type applied to a non-forall IR term");
         };
 
-        body_ty.subst(ty.clone())
+        ret_ty.subst(ty.clone())
       }
     }
   }
@@ -113,7 +112,7 @@ impl IR {
 
 #[derive(Default)]
 struct VarSupply {
-  next: u32,
+  next: usize,
   cache: HashMap<ast::Var, VarId>,
 }
 
@@ -159,10 +158,11 @@ fn lower_ty_scheme(scheme: ast::TypeScheme) -> (Type, LowerTypes) {
     .collect();
 
   let lower = LowerTypes { env: ty_env };
-  let lower_ty = (0..lower.env.len()).fold(lower.lower_ty(scheme.ty), |ty, _| {
+  let lower_ty = lower.lower_ty(scheme.ty);
+  let bound_lower_ty = (0..lower.env.len()).fold(lower_ty, |ty, _| {
     Type::ty_fun(Kind::Type, ty)
   });
-  (lower_ty, lower)
+  (bound_lower_ty, lower)
 }
 
 struct LowerAst {
@@ -200,8 +200,10 @@ fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
     types,
   };
   let ir = lower_ast.lower_ast(ast);
-  let ir = (0..lower_ast.types.env.len()).fold(ir, |ir, _| IR::ty_fun(Kind::Type, ir));
-  (ir, ir_ty)
+  let bound_ir = 
+    (0..lower_ast.types.env.len())
+      .fold(ir, |ir, _| IR::ty_fun(Kind::Type, ir));
+  (bound_ir, ir_ty)
 }
 
 #[cfg(test)]
