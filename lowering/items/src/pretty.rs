@@ -240,11 +240,11 @@ where
         let mut tys = vec![ty];
         let ir = ty_fun.collect_tyapp_tys(&mut tys);
         a.text("ty_app")
-         .append(a.space())
-         .append(ir.pretty(a).brackets())
-         .append(a.line().append(a.intersperse(tys, a.space())).nest(2))
-         .parens()
-         .group()
+          .append(a.space())
+          .append(ir.pretty(a).brackets())
+          .append(a.line().append(a.intersperse(tys, a.space())).nest(2))
+          .parens()
+          .group()
       }
       IR::Tuple(elems) => {
         let single = a
@@ -294,6 +294,7 @@ where
             .nest(2),
         )
         .parens(),
+      IR::Item(_, item_id) => a.text("item").append(a.as_string(item_id.0)),
     }
   }
 }

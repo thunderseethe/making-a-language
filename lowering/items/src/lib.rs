@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use types_rows::{self as ast, Ast, Evidence, TypedVar};
+use types_items::{self as ast, Ast, Evidence, ItemId, TypedVar};
 
 mod pretty;
 
@@ -173,6 +173,7 @@ enum IR {
   Tag(Type, usize, Box<Self>),
   // Case match on a sum.
   Case(Type, Box<Self>, Vec<Branch>),
+  Item(Type, ItemId),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -247,7 +248,12 @@ impl IR {
           )
         };
         if arg.type_of() != *fun_arg_ty {
-          panic!("ICE: Function applied to wrong argument type",);
+          panic!(
+            "ICE: Function applied to wrong argument type {} != {}\n{}",
+            pretty_string(arg.type_of(), 80),
+            pretty_string(*fun_arg_ty, 80),
+            pretty_string(IR::App(fun.clone(), arg.clone()), 80)
+          );
         }
         *ret_ty
       }
@@ -306,6 +312,7 @@ impl IR {
 
         ty.clone()
       }
+      IR::Item(ty, _) => ty.clone(),
     }
   }
 }
@@ -383,7 +390,6 @@ impl Type {
     self
   }
 }
-
 impl Row {
   fn adjust(&mut self, cutoff: usize) {
     match self {
@@ -417,8 +423,15 @@ impl LowerTypes {
 
   fn lower_row_ty(&self, row: ast::Row) -> Row {
     match row {
-      ast::Row::Open(var) => Row::Open(self.env[&AstTypeVar::Row(var)]),
-      ast::Row::Closed(closed_row) => Row::Closed(self.lower_closed_row_ty(closed_row)),
+      ast::Row::Open(var) => {
+        let ty_var = self.env[&AstTypeVar::Row(var)];
+        Row::Open(ty_var)
+      }
+      ast::Row::Closed(closed_row) => {
+        let values = self.lower_closed_row_ty(closed_row);
+        Row::Closed(values)
+      }
+      ast::Row::Unifier(_) => panic!("ICE: Unexpected row unifier in lowering"),
     }
   }
 
@@ -434,6 +447,7 @@ impl LowerTypes {
       ast::Type::Prod(row) => Type::prod(self.lower_row_ty(row)),
       ast::Type::Sum(row) => Type::sum(self.lower_row_ty(row)),
       ast::Type::Label(_, ty) => self.lower_ty(*ty),
+      ast::Type::Unifier(_) => panic!("ICE: Unexpected type unifier in lowering"),
     }
   }
 
@@ -739,6 +753,7 @@ struct LowerAst {
   supply: VarSupply,
   types: LowerTypes,
   ev_to_var: HashMap<Evidence, Var>,
+  item_source: ItemSource,
   solved: Vec<(Var, IR)>,
 }
 
@@ -878,11 +893,59 @@ impl LowerAst {
         let inj_direction = IR::field(IR::field(IR::Var(param), direction_field), 1);
         IR::app(inj_direction, term)
       }
+      Ast::Item(wrapper, item_id) => {
+        let ty = self.item_source.lookup_item(item_id);
+        println!("{}\n{:?}", pretty_string(ty.clone(), 80), wrapper);
+        let item_ir = IR::Item(ty, item_id);
+        let wrapper = wrapper.expect("ICE: Item lacks expected wrapper");
+        let ty_ir = wrapper.types.into_iter().fold(item_ir, |ir, ty| {
+          IR::ty_app(ir, TyApp::Ty(self.types.lower_ty(ty)))
+        });
+        let row_ir = wrapper.rows.into_iter().fold(ty_ir, |ir, row| {
+          IR::ty_app(ir, TyApp::Row(self.types.lower_row_ty(row)))
+        });
+        let ir = wrapper.evidence.into_iter().fold(row_ir, |ir, ev| {
+          let param = self.lookup_ev(ev);
+          IR::app(ir, IR::Var(param))
+        });
+        println!("{}", pretty_string(ir.clone(), 80));
+        ir
+      }
     }
   }
 }
 
+struct ItemSource {
+  items: HashMap<ItemId, Type>,
+}
+impl ItemSource {
+  fn lookup_item(&self, item: ItemId) -> Type {
+    self.items[&item].clone()
+  }
+}
+
+fn lower_item_source(items: ast::ItemSource) -> ItemSource {
+  ItemSource {
+    items: items
+      .types
+      .into_iter()
+      .map(|(item_id, ty_scheme)| {
+        let (ir_ty, _, _) = lower_ty_scheme(ty_scheme);
+        (item_id, ir_ty)
+      })
+      .collect(),
+  }
+}
+
 fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
+  lower_with_items(ast::ItemSource::default(), ast, scheme)
+}
+
+fn lower_with_items(
+  item_source: ast::ItemSource,
+  ast: Ast<TypedVar>,
+  scheme: ast::TypeScheme,
+) -> (IR, Type) {
   let ev = scheme.evidence.clone();
   let (ir_ty, kinds, lower_ty) = lower_ty_scheme(scheme);
 
@@ -904,6 +967,7 @@ fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
     types: lower_ty,
     ev_to_var,
     solved: vec![],
+    item_source: lower_item_source(item_source),
   };
   let ir = lower_ast.lower_ast(ast);
   let solved_ir = lower_ast
@@ -934,11 +998,19 @@ fn pretty_string<'a>(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use types_rows::{self as ast, type_infer, Ast};
+  use types_items::{
+    self as ast, type_infer, type_infer_with_items, Ast, ClosedRow, RowVar, TypeScheme,
+  };
 
   fn lower_test(ast: Ast<ast::Var>) -> (IR, Type) {
     let (ast, scheme) = type_infer(ast).expect("Type inference to succeed");
     lower(ast, scheme)
+  }
+
+  fn lower_item_test(items: ast::ItemSource, ast: Ast<ast::Var>) -> (IR, Type) {
+    let (ast, scheme) =
+      type_infer_with_items(items.clone(), ast).expect("Type inference to succeed");
+    lower_with_items(items, ast, scheme)
   }
 
   #[test]
@@ -1081,17 +1153,17 @@ mod tests {
     let expect_ty = expect_test::expect![[r#"
         forall [Type] .
           forall [Row, Row, Row, Row] .
-            { {T1} -> {T0} -> {T3}
+            { {T3} -> {T2} -> {T0}
              , forall [Type] .
-               <T2> -> T0 -> <T1> -> T0 -> <T4> -> T0
-             , {{T3} -> {T1}, <T1> -> <T3>}
-             , {{T3} -> {T0}, <T0> -> <T3>}
-            } -> { T4 -> {T2} -> {T3}
+               <T4> -> T0 -> <T3> -> T0 -> <T1> -> T0
+             , {{T0} -> {T3}, <T3> -> <T0>}
+             , {{T0} -> {T2}, <T2> -> <T0>}
+            } -> { T4 -> {T1} -> {T0}
                   , forall [Type] .
-                    T5 -> T0 -> <T3> -> T0 -> <T4> -> T0
-                  , {{T3} -> T4, T4 -> <T3>}
-                  , {{T3} -> {T2}, <T2> -> <T3>}
-            } -> {T1} -> {T0} -> T4"#]];
+                    T5 -> T0 -> <T2> -> T0 -> <T1> -> T0
+                  , {{T0} -> T4, T4 -> <T0>}
+                  , {{T0} -> {T1}, <T1> -> <T0>}
+            } -> {T3} -> {T2} -> T4"#]];
     expect_ty.assert_eq(&pretty_string(ir_ty, 80));
   }
 
@@ -1264,4 +1336,97 @@ mod tests {
           <Int -> T0, T0, T0, T0> -> T0"#]];
     expect_ty.assert_eq(&pretty_string(ir_ty, 80));
   }
+
+  macro_rules! set {
+        () => {{ std::collections::BTreeSet::new() }};
+        ($($ele:expr),*) => {{
+            let mut tmp = std::collections::BTreeSet::new();
+            $(tmp.insert($ele);)*
+            tmp
+        }};
+    }
+
+  #[test]
+  fn lower_items() {
+    let items = ast::ItemSource::from_iter([(
+      ItemId(0),
+      TypeScheme {
+        unbound_rows: set![RowVar(9), RowVar(11)],
+        unbound_tys: set![ast::TypeVar(3)],
+        evidence: vec![Evidence::RowEquation {
+          left: ast::Row::Open(RowVar(9)),
+          right: ast::Row::Closed(ClosedRow {
+            fields: vec!["x".to_string()],
+            values: vec![ast::Type::Var(ast::TypeVar(3))],
+          }),
+          goal: ast::Row::Open(RowVar(11)),
+        }],
+        ty: ast::Type::fun(
+          ast::Type::Prod(ast::Row::Open(RowVar(9))),
+          ast::Type::fun(
+            ast::Type::Var(ast::TypeVar(3)),
+            ast::Type::Prod(ast::Row::Open(RowVar(11))),
+          ),
+        ),
+      },
+    )]);
+    let ast = Ast::app(
+      Ast::app(
+        Ast::Item(None, ItemId(0)),
+        Ast::concat_(Ast::label("y", Ast::Int(4)), Ast::label("z", Ast::Int(6))),
+      ),
+      Ast::fun(ast::Var(0), Ast::Var(ast::Var(0))),
+    );
+
+    let (ir, ir_ty) = lower_item_test(items, ast);
+
+    assert_eq!(ir.type_of(), ir_ty);
+
+    let expect_ir = expect_test::expect![[r#"
+        (ty_fun [Type]
+          ((fun [V16]
+            ((fun [V0]
+              ((ty_app [item0] Ty(T0 -> T0) Row(Int, Int) Row(T0 -> T0, Int, Int))
+                V0 (V16[0] 4 6) (fun [V30]
+                  V30)))
+              { (fun [V1, V2]
+                {V2, V1[0], V1[1]})
+              , (ty_fun [Type]
+                (fun [V3, V4, V5]
+                  (case [V5] [
+                    V6 => (V4 V6)
+                    V7 => (V3 <0: V7>)
+                    V8 => (V3 <1: V8>)
+                    ])))
+              , { (fun [V9]
+                  {V9[1], V9[2]})
+                , (fun [V10]
+                  (case [V10] [
+                    V11 => <1: V11>
+                    V12 => <2: V12>
+                    ]))
+                }
+              , {(fun [V13] V13[0]), (fun [V14] ((fun [V15] <0: V15>) V14))}
+              }))
+            { (fun [V17, V18]
+              {V17, V18})
+            , (ty_fun [Type]
+              (fun [V19, V20, V21]
+                (case [V21] [
+                  V22 => (V19 V22)
+                  V23 => (V20 V23)
+                  ])))
+            , {(fun [V24] V24[0]), (fun [V25] ((fun [V26] <0: V26>) V25))}
+            , {(fun [V27] V27[1]), (fun [V28] ((fun [V29] <1: V29>) V28))}
+            }))"#]];
+    expect_ir.assert_eq(&pretty_string(ir, 80));
+
+    let expect_ty = expect_test::expect![[r#"
+        forall [Type] .
+          {T0 -> T0, Int, Int}"#]];
+    expect_ty.assert_eq(&pretty_string(ir_ty, 80));
+  }
+  // TODO: Write tests for items.
+  // * Check that calling item works as expected with wrapper.
+  // * Especially check order of applications in wrapper.
 }

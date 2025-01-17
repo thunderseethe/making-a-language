@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use ena::unify::{EqUnifyValue, UnifyKey};
 
 use crate::ast::Label;
+use crate::Evidence;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClosedRow {
@@ -258,5 +259,9 @@ impl RowCombination {
     let right_equatable = self.right.equatable(&other.left);
     let goal_equatable = self.goal.equatable(&other.goal);
     (goal_equatable && (left_equatable || right_equatable)) || (left_equatable && right_equatable)
+  }
+
+  pub fn into_evidence(self) -> Evidence {
+    Evidence::RowEquation { left: self.left, right: self.right, goal: self.goal }
   }
 }

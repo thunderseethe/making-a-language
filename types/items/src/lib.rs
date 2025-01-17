@@ -3,9 +3,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use ena::unify::InPlaceUnificationTable;
 
-use self::ast::{Ast, ItemId, TypedVar, Var};
+pub use self::ast::{Ast, ItemId, TypedVar, Var, Direction};
 use self::subst::SubstOut;
-use self::ty::{Row, RowCombination, RowUniVar, RowVar, Type, TypeUniVar, TypeVar};
+pub use self::ty::{Row, RowCombination, RowVar, Type, TypeVar, ClosedRow};
+use self::ty::{TypeUniVar, RowUniVar};
 use self::unification::TypeError;
 
 mod ast;
@@ -17,7 +18,7 @@ mod unification;
 
 /// Our constraints
 /// Right now this is just type equality but it will be more substantial later
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Constraint {
   TypeEqual(Type, Type),
   RowCombine(RowCombination),
@@ -28,9 +29,9 @@ pub enum Constraint {
 /// complete compiler.
 /// But for our purposes, we presume something like that has already happened and present the
 /// metadata in a format easy to digest for our typechecker.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ItemSource {
-  types: HashMap<ItemId, TypeScheme>,
+  pub types: HashMap<ItemId, TypeScheme>,
 }
 impl ItemSource {
   fn type_of_item(&self, item_id: ItemId) -> TypeScheme {
@@ -98,20 +99,20 @@ impl TypeInference {
   }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Evidence {
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Evidence {
   RowEquation { left: Row, right: Row, goal: Row },
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
-struct TypeScheme {
-  unbound_rows: BTreeSet<RowVar>,
-  unbound_tys: BTreeSet<TypeVar>,
-  evidence: Vec<Evidence>,
-  ty: Type,
+pub struct TypeScheme {
+  pub unbound_rows: BTreeSet<RowVar>,
+  pub unbound_tys: BTreeSet<TypeVar>,
+  pub evidence: Vec<Evidence>,
+  pub ty: Type,
 }
 
-fn type_infer_with_items(
+pub fn type_infer_with_items(
   item_source: ItemSource,
   ast: Ast<Var>,
 ) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
@@ -146,7 +147,7 @@ fn type_infer_with_items(
   ))
 }
 
-fn type_infer(ast: Ast<Var>) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
+pub fn type_infer(ast: Ast<Var>) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
   type_infer_with_items(ItemSource::default(), ast)
 }
 
@@ -341,7 +342,7 @@ mod tests {
       Ast::fun(
         n,
         Ast::unlabel(
-          Ast::project(Direction::Left, Ast::concat(Ast::Var(m), Ast::Var(n))),
+          Ast::project_(Direction::Left, Ast::concat_(Ast::Var(m), Ast::Var(n))),
           "x",
         ),
       ),
@@ -390,8 +391,8 @@ mod tests {
         Ast::fun(
           x,
           Ast::app(
-            Ast::branch(Ast::Var(f), Ast::Var(g)),
-            Ast::inject(Direction::Right, Ast::label("Con", Ast::Var(x))),
+            Ast::branch_(Ast::Var(f), Ast::Var(g)),
+            Ast::inject_(Direction::Right, Ast::label("Con", Ast::Var(x))),
           ),
         ),
       ),
@@ -442,7 +443,7 @@ mod tests {
       Ast::fun(
         n,
         Ast::unlabel(
-          Ast::project(Direction::Left, Ast::concat(Ast::Var(m), Ast::Var(n))),
+          Ast::project_(Direction::Left, Ast::concat_(Ast::Var(m), Ast::Var(n))),
           "x",
         ),
       ),
@@ -508,7 +509,7 @@ mod tests {
     let ast = Ast::fun(
       m,
       Ast::app(
-        Ast::app(Ast::Item(wand), Ast::Var(m)),
+        Ast::app(Ast::Item(None, wand), Ast::Var(m)),
         Ast::label("y", Ast::Int(3)),
       ),
     );
