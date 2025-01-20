@@ -3,6 +3,8 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use types_base::{self as ast, Ast, TypedVar};
 
+mod pretty;
+
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 struct VarId(usize);
 
@@ -208,7 +210,9 @@ fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
+  use self::pretty::pretty_string;
+
+use super::*;
   use types_base::{self as ast, type_infer, Ast};
 
   fn lower_test(ast: Ast<ast::Var>) -> (IR, Type) {
@@ -222,9 +226,13 @@ mod tests {
 
     let (ir, ir_ty) = lower_test(ast);
 
-    assert_eq!(ir, IR::Int(3));
-    // Int
     assert_eq!(ir_ty, ir.type_of());
+
+    let expect_ir = expect_test::expect!["3"];
+    expect_ir.assert_eq(pretty_string(ir, 80).as_str());
+
+    let expect_ir_ty = expect_test::expect!["Int"];
+    expect_ir_ty.assert_eq(pretty_string(ir_ty, 80).as_str());
   }
 
   #[test]
@@ -234,11 +242,18 @@ mod tests {
 
     let (ir, ir_ty) = lower_test(ast);
 
-    let a = Type::Var(TypeVar(0));
-    let x = Var::new(VarId(0), a);
-    assert_eq!(ir, IR::ty_fun(Kind::Type, IR::fun(x.clone(), IR::Var(x))));
-    // forall(fun(Var(a), Var(a)))
     assert_eq!(ir_ty, ir.type_of());
+
+    let expect_ir = expect_test::expect![[r#"
+        (ty_fun [Type]
+          (fun [V0]
+            V0))"#]];
+    expect_ir.assert_eq(pretty_string(ir, 80).as_str());
+
+    let expect_ir_ty = expect_test::expect![[r#"
+        ty_fun [Type] .
+          T0 -> T0"#]];
+    expect_ir_ty.assert_eq(pretty_string(ir_ty, 80).as_str());
   }
 
   #[test]
@@ -249,19 +264,18 @@ mod tests {
 
     let (ir, ir_ty) = lower_test(ast);
 
-    let a = TypeVar(1);
-    let b = TypeVar(0);
-    let x = Var::new(VarId(0), Type::Var(a));
-    let y = Var::new(VarId(1), Type::Var(b));
-    assert_eq!(
-      ir,
-      IR::ty_fun(
-        Kind::Type,
-        IR::ty_fun(Kind::Type, IR::fun(x.clone(), IR::fun(y, IR::Var(x))))
-      )
-    );
-    // forall(forall(fun(Var(a), fun(Var(b), Var(a)))))
     assert_eq!(ir_ty, ir.type_of());
+
+    let expect_ir = expect_test::expect![[r#"
+        (ty_fun [Type Type]
+          (fun [V0, V1]
+            V0))"#]];
+    expect_ir.assert_eq(pretty_string(ir, 80).as_str());
+
+    let expect_ir_ty = expect_test::expect![[r#"
+        ty_fun [Type, Type] .
+          T1 -> T0 -> T1"#]];
+    expect_ir_ty.assert_eq(pretty_string(ir_ty, 80).as_str());
   }
 
   #[test]
@@ -285,41 +299,18 @@ mod tests {
 
     let (ir, ir_ty) = lower_test(ast);
 
-    let a = TypeVar(2);
-    let b = TypeVar(1);
-    let c = TypeVar(0);
-    let x = Var::new(
-      VarId(0),
-      Type::fun(Type::Var(a), Type::fun(Type::Var(b), Type::Var(c))),
-    );
-    let y = Var::new(VarId(1), Type::fun(Type::Var(a), Type::Var(b)));
-    let z = Var::new(VarId(2), Type::Var(a));
-    assert_eq!(
-      ir,
-      IR::ty_fun(
-        Kind::Type,
-        IR::ty_fun(
-          Kind::Type,
-          IR::ty_fun(
-            Kind::Type,
-            IR::fun(
-              x.clone(),
-              IR::fun(
-                y.clone(),
-                IR::fun(
-                  z.clone(),
-                  IR::app(
-                    IR::app(IR::Var(x), IR::Var(z.clone())),
-                    IR::app(IR::Var(y), IR::Var(z))
-                  )
-                )
-              )
-            )
-          )
-        )
-      )
-    );
-    // forall(forall(forall(fun(fun(Var(a), fun(Var(b), Var(c))), fun(fun(Var(a), Var(b)), fun(Var(a), Var(c)))))))
     assert_eq!(ir_ty, ir.type_of());
+
+    let expect_ir = expect_test::expect![[r#"
+        (ty_fun [Type Type Type]
+          (fun [V0, V1, V2]
+            (V0 V2 (V1 V2))))"#]];
+    expect_ir.assert_eq(pretty_string(ir, 80).as_str());
+
+    let expect_ir_ty = expect_test::expect![[r#"
+        ty_fun [Type, Type, Type] .
+          (T2 -> T1 -> T0) -> (T2 -> T1) -> T2 -> T0"#]];
+    expect_ir_ty.assert_eq(pretty_string(ir_ty, 80).as_str());
+
   }
 }
