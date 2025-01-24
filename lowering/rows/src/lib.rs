@@ -30,13 +30,19 @@ enum Kind {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
+enum Row {
+  Open(TypeVar),
+  Closed(Vec<Type>),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum Type {
   Int,
   Var(TypeVar),
   Fun(Box<Self>, Box<Self>),
   TyFun(Kind, Box<Self>),
-  Prod(Vec<Self>),
-  Sum(Vec<Self>),
+  Prod(Row),
+  Sum(Row),
 }
 
 impl Type {
@@ -55,51 +61,100 @@ impl Type {
     Self::TyFun(kind, Box::new(body))
   }
 
-  fn prod(elems: Vec<Self>) -> Self
-  {
-    if elems.len() == 1 {
-      elems.into_iter().next().unwrap()
-    } else {
-      Self::Prod(elems)
+  fn prod(row: Row) -> Self {
+    match row {
+      Row::Closed(elems) if elems.len() == 1 => elems.into_iter().next().unwrap(),
+      row => Self::Prod(row),
     }
   }
 
-  fn sum(elems: Vec<Self>) -> Self {
-    if elems.len() == 1 {
-      elems.into_iter().next().unwrap()
-    } else {
-      Self::Sum(elems)
+  fn sum(row: Row) -> Self {
+    match row {
+      Row::Closed(elems) if elems.len() == 1 => elems.into_iter().next().unwrap(),
+      row => Self::Sum(row),
     }
   }
 
-  fn subst_internal(self, ty: Self, needle: usize) -> Self {
+  fn subst_row(self, row: Row) -> Self {
+    Subst::RowPayload(row).subst_ty(self, 0)
+  }
+
+  fn subst_ty(self, ty: Self) -> Self {
+    Subst::TyPayload(ty).subst_ty(self, 0)
+  }
+}
+
+#[derive(Clone)]
+enum Subst {
+  RowPayload(Row),
+  TyPayload(Type),
+}
+impl Subst {
+  fn shift(&mut self) {
     match self {
+      Subst::RowPayload(row) => row.shift(),
+      Subst::TyPayload(ty) => ty.shift(),
+    }
+  }
+
+  fn shifted(mut self) -> Self {
+    self.shift();
+    self
+  }
+
+  fn subst_row_var(self) -> Row {
+    match self {
+      Subst::RowPayload(row) => row,
+      Subst::TyPayload(_) => panic!("ICE: Kind mismatch. A type was substituted for a row"),
+    }
+  }
+
+  fn subst_ty_var(self) -> Type {
+    match self {
+      Subst::TyPayload(ty) => ty,
+      Subst::RowPayload(_) => panic!("ICE: Kind mismatch. A type was substituted for a row"),
+    }
+  }
+
+  fn subst_row(self, haystack: Row, needle: usize) -> Row {
+    match haystack {
+      Row::Open(row_var) => match row_var.0.cmp(&needle) {
+        Ordering::Equal => self.subst_row_var(),
+        Ordering::Less => Row::Open(row_var),
+        Ordering::Greater => Row::Open(TypeVar(row_var.0 - 1)),
+      },
+      Row::Closed(elems) => Row::Closed(
+        elems
+          .into_iter()
+          .map(|elem| self.clone().subst_ty(elem, needle))
+          .collect(),
+      ),
+    }
+  }
+
+  fn subst_ty(self, haystack: Type, needle: usize) -> Type {
+    match haystack {
       Type::Int => Type::Int,
       Type::Var(type_var) => match type_var.0.cmp(&needle) {
-        Ordering::Equal => ty,
+        Ordering::Equal => self.subst_ty_var(),
         Ordering::Less => Type::Var(type_var),
         Ordering::Greater => Type::Var(TypeVar(type_var.0 - 1)),
       },
-      Type::Fun(arg, ret) => Type::fun(arg.subst(ty.clone()), ret.subst(ty)),
-      Type::TyFun(kind, body) => Type::ty_fun(kind, body.subst_internal(ty, needle + 1)),
-      Type::Prod(elems) => Type::prod(
-        elems
-          .into_iter()
-          .map(|elem| elem.subst_internal(ty.clone(), needle))
-          .collect(),
+      Type::Fun(arg, ret) => Type::fun(
+        self.clone().subst_ty(*arg, needle),
+        self.subst_ty(*ret, needle),
       ),
-      Type::Sum(elems) => Type::sum(
-        elems
-          .into_iter()
-          .map(|elem| elem.subst_internal(ty.clone(), needle))
-          .collect(),
-      ),
+      Type::TyFun(kind, body) => Type::ty_fun(kind, self.shifted().subst_ty(*body, needle + 1)),
+      Type::Prod(row) => Type::prod(self.subst_row(row, needle)),
+      Type::Sum(row) => Type::sum(self.subst_row(row, needle)),
     }
   }
+}
 
-  fn subst(self, ty: Self) -> Self {
-    self.subst_internal(ty, 0)
-  }
+#[derive(Debug, PartialEq, Eq, Clone)]
+enum TyApp {
+  Ty(Type),
+  Row(Row),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
@@ -109,7 +164,7 @@ enum IR {
   Fun(Var, Box<Self>),
   App(Box<Self>, Box<Self>),
   TyFun(Kind, Box<Self>),
-  TyApp(Box<Self>, Type),
+  TyApp(Box<Self>, TyApp),
   // Create a product type.
   Tuple(Vec<Self>),
   // Select a field out of a product.
@@ -153,7 +208,7 @@ impl IR {
     Self::TyFun(kind, Box::new(ir))
   }
 
-  fn ty_app(body: IR, ty: Type) -> IR {
+  fn ty_app(body: IR, ty: TyApp) -> IR {
     Self::TyApp(Box::new(body), ty)
   }
 
@@ -182,6 +237,7 @@ impl IR {
       IR::Var(var) => var.ty.clone(),
       IR::Int(_) => Type::Int,
       IR::Fun(arg, body) => Type::fun(arg.ty.clone(), body.type_of()),
+      IR::TyFun(kind, body) => Type::ty_fun(*kind, body.type_of()),
       IR::App(fun, arg) => {
         let Type::Fun(fun_arg_ty, ret_ty) = fun.type_of() else {
           panic!(
@@ -190,32 +246,36 @@ impl IR {
             pretty_string(self.clone(), 80)
           )
         };
-        let arg_ty = arg.type_of();
-        if arg_ty != *fun_arg_ty {
-          panic!(
-            "ICE: Function applied to wrong argument type:\n{:?}\n{:?}",
-            arg_ty, fun_arg_ty
-          );
+        if arg.type_of() != *fun_arg_ty {
+          panic!("ICE: Function applied to wrong argument type",);
         }
         *ret_ty
       }
-      IR::TyFun(kind, body) => Type::ty_fun(*kind, body.type_of()),
-      IR::TyApp(body, ty) => {
-        let Type::TyFun(_, body_ty) = body.type_of() else {
+      IR::TyApp(body, ty_app) => {
+        let Type::TyFun(kind, ret_ty) = body.type_of() else {
           panic!("ICE: Type applied to a non-forall IR term");
         };
 
-        body_ty.subst(ty.clone())
+        match (kind, ty_app) {
+          (Kind::Type, TyApp::Ty(ty)) => ret_ty.subst_ty(ty.clone()),
+          (Kind::Row, TyApp::Row(row)) => ret_ty.subst_row(row.clone()),
+          (Kind::Type, TyApp::Row(_)) => {
+            panic!("ICE: Kind mismatch. Type applied a Row to variable of kind Type")
+          }
+          (Kind::Row, TyApp::Ty(_)) => {
+            panic!("ICE: Kind mismatch. Type applied a Type to variable of kind Row")
+          }
+        }
       }
-      IR::Tuple(elems) => Type::Prod(elems.iter().map(|ir| ir.type_of()).collect()),
+      IR::Tuple(elems) => Type::Prod(Row::Closed(elems.iter().map(|ir| ir.type_of()).collect())),
       IR::Field(body, field) => {
-        let Type::Prod(elems) = body.type_of() else {
+        let Type::Prod(Row::Closed(elems)) = body.type_of() else {
           panic!("ICE: IR accessed field of a non product type");
         };
         elems[*field].clone()
       }
       IR::Tag(ty, tag, body) => {
-        let Type::Sum(elems) = ty else {
+        let Type::Sum(Row::Closed(elems)) = ty else {
           panic!("ICE: Tagged value with non sum type");
         };
 
@@ -226,7 +286,7 @@ impl IR {
         ty.clone()
       }
       IR::Case(ty, elem, branches) => {
-        let Type::Sum(elems) = elem.type_of() else {
+        let Type::Sum(Row::Closed(elems)) = elem.type_of() else {
           panic!("ICE: Case scrutinee does not have sum type")
         };
 
@@ -310,7 +370,7 @@ impl Type {
       Type::TyFun(_, body) => {
         body.adjust(cutoff + 1);
       }
-      Type::Prod(elems) | Type::Sum(elems) => elems.iter_mut().for_each(|ty| ty.adjust(cutoff)),
+      Type::Prod(row) | Type::Sum(row) => row.adjust(cutoff),
     }
   }
 
@@ -321,6 +381,23 @@ impl Type {
   fn shifted(mut self) -> Self {
     self.shift();
     self
+  }
+}
+
+impl Row {
+  fn adjust(&mut self, cutoff: usize) {
+    match self {
+      Row::Open(type_var) => type_var.adjust(cutoff),
+      Row::Closed(tys) => {
+        for ty in tys {
+          ty.adjust(cutoff);
+        }
+      }
+    }
+  }
+
+  fn shift(&mut self) {
+    self.adjust(0);
   }
 }
 
@@ -338,16 +415,10 @@ impl LowerTypes {
       .collect()
   }
 
-  fn lower_row_ty(&self, row: ast::Row) -> (Type, Type) {
+  fn lower_row_ty(&self, row: ast::Row) -> Row {
     match row {
-      ast::Row::Open(var) => {
-        let ty_var = self.env[&AstTypeVar::Row(var)];
-        (Type::Var(ty_var), Type::Var(ty_var))
-      }
-      ast::Row::Closed(closed_row) => {
-        let values = self.lower_closed_row_ty(closed_row);
-        (Type::prod(values.clone()), Type::sum(values))
-      }
+      ast::Row::Open(var) => Row::Open(self.env[&AstTypeVar::Row(var)]),
+      ast::Row::Closed(closed_row) => Row::Closed(self.lower_closed_row_ty(closed_row)),
     }
   }
 
@@ -360,14 +431,8 @@ impl LowerTypes {
         let ret = self.lower_ty(*ret);
         Type::fun(arg, ret)
       }
-      ast::Type::Prod(row) => {
-        let (ty, _) = self.lower_row_ty(row);
-        ty
-      }
-      ast::Type::Sum(row) => {
-        let (_, ty) = self.lower_row_ty(row);
-        ty
-      }
+      ast::Type::Prod(row) => Type::prod(self.lower_row_ty(row)),
+      ast::Type::Sum(row) => Type::sum(self.lower_row_ty(row)),
       ast::Type::Label(_, ty) => self.lower_ty(*ty),
     }
   }
@@ -375,9 +440,12 @@ impl LowerTypes {
   fn lower_ev_ty(&self, evidence: ast::Evidence) -> Type {
     match evidence {
       ast::Evidence::RowEquation { left, right, goal } => {
-        let (left_prod, left_sum) = self.lower_row_ty(left);
-        let (right_prod, right_sum) = self.lower_row_ty(right);
-        let (goal_prod, goal_sum) = self.lower_row_ty(goal);
+        let left = self.lower_row_ty(left);
+        let (left_prod, left_sum) = (Type::prod(left.clone()), Type::sum(left));
+        let right = self.lower_row_ty(right);
+        let (right_prod, right_sum) = (Type::prod(right.clone()), Type::sum(right));
+        let goal = self.lower_row_ty(goal);
+        let (goal_prod, goal_sum) = (Type::prod(goal.clone()), Type::sum(goal));
 
         let concat = Type::funs([left_prod.clone(), right_prod.clone()], goal_prod.clone());
         let branch = {
@@ -398,12 +466,12 @@ impl LowerTypes {
         let inj_left = Type::fun(left_sum, goal_sum.clone());
         let prj_right = Type::fun(goal_prod, right_prod);
         let inj_right = Type::fun(right_sum, goal_sum);
-        Type::prod(vec![
+        Type::prod(Row::Closed(vec![
           concat,
           branch,
-          Type::prod(vec![prj_left, inj_left]),
-          Type::prod(vec![prj_right, inj_right]),
-        ])
+          Type::prod(Row::Closed(vec![prj_left, inj_left])),
+          Type::prod(Row::Closed(vec![prj_right, inj_right])),
+        ]))
       }
     }
   }
@@ -427,7 +495,7 @@ fn lower_ty_scheme(scheme: ast::TypeScheme) -> (Type, Vec<Kind>, LowerTypes) {
   let lower = LowerTypes { env: ty_env };
 
   let lower_ty = lower.lower_ty(scheme.ty);
-  let lower_ty = Type::funs(
+  let evident_lower_ty = Type::funs(
     scheme
       .evidence
       .into_iter()
@@ -435,10 +503,10 @@ fn lower_ty_scheme(scheme: ast::TypeScheme) -> (Type, Vec<Kind>, LowerTypes) {
       .collect::<Vec<_>>(),
     lower_ty,
   );
-  let lower_ty = kinds
+  let bound_lower_ty = kinds
     .iter()
-    .fold(lower_ty, |ty, kind| Type::ty_fun(*kind, ty));
-  (lower_ty, kinds, lower)
+    .fold(evident_lower_ty, |ty, kind| Type::ty_fun(*kind, ty));
+  (bound_lower_ty, kinds, lower)
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -474,23 +542,23 @@ fn unwrap_prj(index: usize, len: usize, prod: Var) -> IR {
 
 impl LowerSolvedEv<'_> {
   fn left_prod(&self) -> Type {
-    Type::prod(self.left.clone())
+    Type::prod(Row::Closed(self.left.clone()))
   }
   fn right_prod(&self) -> Type {
-    Type::prod(self.right.clone())
+    Type::prod(Row::Closed(self.right.clone()))
   }
   fn goal_prod(&self) -> Type {
-    Type::prod(self.goal.clone())
+    Type::prod(Row::Closed(self.goal.clone()))
   }
 
   fn left_sum(&self) -> Type {
-    Type::sum(self.left.clone())
+    Type::sum(Row::Closed(self.left.clone()))
   }
   fn right_sum(&self) -> Type {
-    Type::sum(self.right.clone())
+    Type::sum(Row::Closed(self.right.clone()))
   }
   fn goal_sum(&self) -> Type {
-    Type::sum(self.goal.clone())
+    Type::sum(Row::Closed(self.goal.clone()))
   }
 
   fn make_vars<const N: usize>(&mut self, tys: [Type; N]) -> [Var; N] {
@@ -670,113 +738,30 @@ impl LowerSolvedEv<'_> {
 struct LowerAst {
   supply: VarSupply,
   types: LowerTypes,
-  ast_to_ev: HashMap<Ast<TypedVar>, (ast::Evidence, ast::Type)>,
   ev_to_var: HashMap<Evidence, Var>,
+  solved: Vec<(Var, IR)>,
 }
 
 impl LowerAst {
   /// Look up the IR variable that represents the evidence for a given AST node.
-  fn lookup_ev(&self, ast: &Ast<TypedVar>) -> Option<(Var, ast::Type)> {
-    let (ev, ty) = self.ast_to_ev.get(ast)?;
-    let param = self.ev_to_var.get(ev)?.clone();
-    Some((param, ty.clone()))
-  }
-
-  fn lower_ast(&mut self, ast: Ast<TypedVar>) -> IR {
-    match ast {
-      Ast::Var(TypedVar(var, ty)) => IR::Var(Var::new(
-        self.supply.supply_for(var),
-        self.types.lower_ty(ty),
-      )),
-      Ast::Int(i) => IR::Int(i),
-      Ast::Fun(TypedVar(var, ty), body) => {
-        let ir_ty = self.types.lower_ty(ty);
-        let ir_var = self.supply.supply_for(var);
-        let ir_body = self.lower_ast(*body);
-        IR::fun(Var::new(ir_var, ir_ty), ir_body)
-      }
-      Ast::App(fun, arg) => {
-        let ir_fun = self.lower_ast(*fun);
-        let ir_arg = self.lower_ast(*arg);
-        IR::app(ir_fun, ir_arg)
-      }
-      // Labels are only required for type checking.
-      // We erase them in the IR.
-      Ast::Label(_, body) => self.lower_ast(*body),
-      Ast::Unlabel(body, _) => self.lower_ast(*body),
-      Ast::Concat(left, right) => {
-        let (param, _) = self
-          .lookup_ev(&Ast::Concat(left.clone(), right.clone()))
-          .expect("ICE: Concat AST node lacks an expected evidence");
-
-        let left = self.lower_ast(*left);
-        let right = self.lower_ast(*right);
-        let concat = IR::field(IR::Var(param), 0);
-        IR::app(IR::app(concat, left), right)
-      }
-      Ast::Project(direction, body) => {
-        let (param, _) = self
-          .lookup_ev(&Ast::Project(direction, body.clone()))
-          .expect("ICE: Project AST node lacks an expected evidence");
-
-        let term = self.lower_ast(*body);
-        let direction_field = match direction {
-          ast::Direction::Left => 2,
-          ast::Direction::Right => 3,
+  fn lookup_ev(&mut self, ev: Evidence) -> Var {
+    // If we've seen this evidence before, reuse the variable we already generated.
+    // Otherwise, generate a variable for our solved evidence.
+    self
+      .ev_to_var
+      .entry(ev)
+      .or_insert_with_key(|ev| {
+        // If we see a vacant entry during lowering it must be solved.
+        // All our unsolved evidence appears in the type scheme.
+        let Evidence::RowEquation {
+          left: ast::Row::Closed(left),
+          right: ast::Row::Closed(right),
+          goal: ast::Row::Closed(goal),
+        } = ev
+        else {
+          panic!("ICE: Unsolved evidence appeared in AST that wasn't in type scheme");
         };
-        let prj_direction = IR::field(IR::field(IR::Var(param), direction_field), 0);
-        IR::app(prj_direction, term)
-      }
-      Ast::Branch(left, right) => {
-        let (param, ty) = self
-          .lookup_ev(&Ast::Branch(left.clone(), right.clone()))
-          .expect("ICE: Branch AST node lacks an expected evidence");
-
-        let ret_ty = self.types.lower_ty(ty);
-        let left = self.lower_ast(*left);
-        let right = self.lower_ast(*right);
-        let branch = IR::ty_app(IR::field(IR::Var(param), 1), ret_ty);
-        IR::app(IR::app(branch, left), right)
-      }
-      Ast::Inject(direction, body) => {
-        let (param, _) = self
-          .lookup_ev(&Ast::Inject(direction, body.clone()))
-          .expect("ICE: Inject AST node lacks an expected evidence");
-
-        let term = self.lower_ast(*body);
-        let direction_field = match direction {
-          ast::Direction::Left => 2,
-          ast::Direction::Right => 3,
-        };
-        let inj_direction = IR::field(IR::field(IR::Var(param), direction_field), 1);
-        IR::app(inj_direction, term)
-      }
-    }
-  }
-}
-
-fn create_locals_for_solved_ev(
-  lower_ty: &LowerTypes,
-  ast_to_ev: &HashMap<Ast<TypedVar>, (ast::Evidence, ast::Type)>,
-  supply: &mut VarSupply,
-  ev_to_var: &mut HashMap<ast::Evidence, Var>,
-) -> Vec<(Var, IR)> {
-  let mut solved = vec![];
-  let mut evs = ast_to_ev.values().cloned().collect::<Vec<_>>();
-  // We sort our vector so that our variable generation isn't reliant on the order of the hash map.
-  // This makes testing more deterministic since hash order will change between test runs.
-  evs.sort();
-  for (ev, _) in evs {
-    // Any unsolved evidence would've appeared in our type scheme, so we only have to handle solved
-    // evidence here.
-    if let ast::Evidence::RowEquation {
-      left: ast::Row::Closed(left),
-      right: ast::Row::Closed(right),
-      goal: ast::Row::Closed(goal),
-    } = ev.clone()
-    {
-      ev_to_var.entry(ev.clone()).or_insert_with(|| {
-        let param = supply.supply();
+        let param = self.supply.supply();
 
         let mut left_indices = vec![0; left.fields.len()];
         let mut right_indices = vec![0; right.fields.len()];
@@ -802,12 +787,12 @@ fn create_locals_for_solved_ev(
           })
           .collect::<Vec<_>>();
 
-        let left_values = lower_ty.lower_closed_row_ty(left.clone());
-        let right_values = lower_ty.lower_closed_row_ty(right.clone());
-        let goal_values = lower_ty.lower_closed_row_ty(goal);
+        let left_values = self.types.lower_closed_row_ty(left.clone());
+        let right_values = self.types.lower_closed_row_ty(right.clone());
+        let goal_values = self.types.lower_closed_row_ty(goal.clone());
 
         let lower_solved_ev = LowerSolvedEv {
-          supply,
+          supply: &mut self.supply,
           left: left_values,
           right: right_values,
           goal: goal_values,
@@ -817,26 +802,92 @@ fn create_locals_for_solved_ev(
         };
 
         let term = lower_solved_ev.lower_ev_term();
-        let ty = lower_ty.lower_ev_ty(ev.clone());
+        let ty = self.types.lower_ev_ty(ev.clone());
         let var = Var::new(param, ty);
-        solved.push((var.clone(), term));
+        self.solved.push((var.clone(), term));
         var
-      });
+      })
+      .clone()
+  }
+
+  fn lower_ast(&mut self, ast: Ast<TypedVar>) -> IR {
+    match ast {
+      Ast::Var(TypedVar(var, ty)) => IR::Var(Var::new(
+        self.supply.supply_for(var),
+        self.types.lower_ty(ty),
+      )),
+      Ast::Int(i) => IR::Int(i),
+      Ast::Fun(TypedVar(var, ty), body) => {
+        let ir_ty = self.types.lower_ty(ty);
+        let ir_var = self.supply.supply_for(var);
+        let ir_body = self.lower_ast(*body);
+        IR::fun(Var::new(ir_var, ir_ty), ir_body)
+      }
+      Ast::App(fun, arg) => {
+        let ir_fun = self.lower_ast(*fun);
+        let ir_arg = self.lower_ast(*arg);
+        IR::app(ir_fun, ir_arg)
+      }
+      // Labels are only required for type checking.
+      // We erase them in the IR.
+      Ast::Label(_, body) => self.lower_ast(*body),
+      Ast::Unlabel(body, _) => self.lower_ast(*body),
+      Ast::Concat(meta, left, right) => {
+        let param = meta
+          .map(|ev| self.lookup_ev(ev))
+          .expect("ICE: Concat AST node lacks an expected evidence");
+
+        let left = self.lower_ast(*left);
+        let right = self.lower_ast(*right);
+        let concat = IR::field(IR::Var(param), 0);
+        IR::app(IR::app(concat, left), right)
+      }
+      Ast::Project(meta, direction, body) => {
+        let param = meta
+          .map(|ev| self.lookup_ev(ev))
+          .expect("ICE: Project AST node lacks an expected evidence");
+
+        let term = self.lower_ast(*body);
+        let direction_field = match direction {
+          ast::Direction::Left => 2,
+          ast::Direction::Right => 3,
+        };
+        let prj_direction = IR::field(IR::field(IR::Var(param), direction_field), 0);
+        IR::app(prj_direction, term)
+      }
+      Ast::Branch(meta, left, right) => {
+        let meta = meta.expect("ICE: Branch AST node lacks expected meta");
+        let param = self.lookup_ev(meta.evidence);
+
+        let ret_ty = self.types.lower_ty(meta.ty);
+        let left = self.lower_ast(*left);
+        let right = self.lower_ast(*right);
+        let branch = IR::ty_app(IR::field(IR::Var(param), 1), TyApp::Ty(ret_ty));
+        IR::app(IR::app(branch, left), right)
+      }
+      Ast::Inject(meta, direction, body) => {
+        let param = meta
+          .map(|ev| self.lookup_ev(ev))
+          .expect("ICE: Inject AST node lacks an expected evidence");
+
+        let term = self.lower_ast(*body);
+        let direction_field = match direction {
+          ast::Direction::Left => 2,
+          ast::Direction::Right => 3,
+        };
+        let inj_direction = IR::field(IR::field(IR::Var(param), direction_field), 1);
+        IR::app(inj_direction, term)
+      }
     }
   }
-  solved
 }
 
-fn lower(
-  ast: Ast<TypedVar>,
-  scheme: ast::TypeScheme,
-  ast_to_ev: HashMap<Ast<TypedVar>, (ast::Evidence, ast::Type)>,
-) -> (IR, Type) {
-  let mut supply = VarSupply::default();
+fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
   let ev = scheme.evidence.clone();
   let (ir_ty, kinds, lower_ty) = lower_ty_scheme(scheme);
 
-  let mut ev_to_var: HashMap<types_rows::Evidence, Var> = HashMap::default();
+  let mut supply = VarSupply::default();
+  let mut ev_to_var: HashMap<ast::Evidence, Var> = HashMap::default();
   let params = ev
     .into_iter()
     .map(|ev| {
@@ -848,21 +899,24 @@ fn lower(
     })
     .collect::<Vec<_>>();
 
-  let solved = create_locals_for_solved_ev(&lower_ty, &ast_to_ev, &mut supply, &mut ev_to_var);
-
   let mut lower_ast = LowerAst {
     supply,
     types: lower_ty,
-    ast_to_ev,
     ev_to_var,
+    solved: vec![],
   };
   let ir = lower_ast.lower_ast(ast);
-  let ir = solved
+  let solved_ir = lower_ast
+    .solved
     .into_iter()
     .fold(ir, |ir, (var, solved)| IR::app(IR::fun(var, ir), solved));
-  let ir = params.into_iter().rfold(ir, |ir, var| IR::fun(var, ir));
-  let ir = kinds.into_iter().fold(ir, |ir, kind| IR::ty_fun(kind, ir));
-  (ir, ir_ty)
+  let param_ir = params
+    .into_iter()
+    .rfold(solved_ir, |ir, var| IR::fun(var, ir));
+  let bound_ir = kinds
+    .into_iter()
+    .fold(param_ir, |ir, kind| IR::ty_fun(kind, ir));
+  (bound_ir, ir_ty)
 }
 
 fn pretty_string<'a>(
@@ -883,8 +937,8 @@ mod tests {
   use types_rows::{self as ast, type_infer, Ast};
 
   fn lower_test(ast: Ast<ast::Var>) -> (IR, Type) {
-    let (ast, scheme, ast_to_ev) = type_infer(ast).expect("Type inference to succeed");
-    lower(ast, scheme, ast_to_ev)
+    let (ast, scheme) = type_infer(ast).expect("Type inference to succeed");
+    lower(ast, scheme)
   }
 
   #[test]
@@ -1004,7 +1058,7 @@ mod tests {
       Ast::fun(
         n,
         Ast::unlabel(
-          Ast::project(ast::Direction::Left, Ast::concat(Ast::Var(m), Ast::Var(n))),
+          Ast::project_(ast::Direction::Left, Ast::concat_(Ast::Var(m), Ast::Var(n))),
           "x",
         ),
       ),
@@ -1027,26 +1081,26 @@ mod tests {
     let expect_ty = expect_test::expect![[r#"
         forall [Type] .
           forall [Row, Row, Row, Row] .
-            { T1 -> T0 -> T3
-            , forall [Type] .
-              T2 -> T0 -> T1 -> T0 -> T4 -> T0
-            , {T3 -> T1, T1 -> T3}
-            , {T3 -> T0, T0 -> T3}
-            } -> { T4 -> T2 -> T3
-                 , forall [Type] .
-                   T5 -> T0 -> T3 -> T0 -> T4 -> T0
-                 , {T3 -> T4, T4 -> T3}
-                 , {T3 -> T2, T2 -> T3}
-                 } -> T1 -> T0 -> T4"#]];
+            { {T1} -> {T0} -> {T3}
+             , forall [Type] .
+               <T2> -> T0 -> <T1> -> T0 -> <T4> -> T0
+             , {{T3} -> {T1}, <T1> -> <T3>}
+             , {{T3} -> {T0}, <T0> -> <T3>}
+            } -> { T4 -> {T2} -> {T3}
+                  , forall [Type] .
+                    T5 -> T0 -> <T3> -> T0 -> <T4> -> T0
+                  , {{T3} -> T4, T4 -> <T3>}
+                  , {{T3} -> {T2}, <T2> -> <T3>}
+            } -> {T1} -> {T0} -> T4"#]];
     expect_ty.assert_eq(&pretty_string(ir_ty, 80));
   }
 
   #[test]
   fn lower_big_product() {
     let m = ast::Var(0);
-    let ast = Ast::concat(
-      Ast::concat(Ast::label("x", Ast::Int(1)), Ast::label("y", Ast::Int(2))),
-      Ast::concat(
+    let ast = Ast::concat_(
+      Ast::concat_(Ast::label("x", Ast::Int(1)), Ast::label("y", Ast::Int(2))),
+      Ast::concat_(
         Ast::label("a", Ast::fun(m, Ast::Var(m))),
         Ast::label("z", Ast::Int(3)),
       ),
@@ -1056,61 +1110,61 @@ mod tests {
 
     assert_eq!(ir.type_of(), ir_ty);
 
-    // Haha, oh god.
+    // Haha, oh god. We can't get to inlining fast enough.
     let expect_ir = expect_test::expect![[r#"
         (ty_fun [Type]
-          ((fun [V28]
-            ((fun [V14]
+          ((fun [V32]
+            ((fun [V18]
               ((fun [V0]
-                (V28[0] (V14[0] 1 2) (V0[0] (fun [V46] V46) 3)))
+                (V0[0] (V18[0] 1 2) (V32[0] (fun [V46] V46) 3)))
                 { (fun [V1, V2]
-                  {V1, V2})
+                  {V2[0], V1[0], V1[1], V2[1]})
                 , (ty_fun [Type]
                   (fun [V3, V4, V5]
                     (case [V5] [
-                      V6 => (V3 V6)
-                      V7 => (V4 V7)
+                      V6 => (V4 <0: V6>)
+                      V7 => (V3 <0: V7>)
+                      V8 => (V3 <1: V8>)
+                      V9 => (V4 <1: V9>)
                       ])))
-                , {(fun [V8] V8[0]), (fun [V9] ((fun [V10] <0: V10>) V9))}
-                , {(fun [V11] V11[1]), (fun [V12] ((fun [V13] <1: V13>) V12))}
+                , { (fun [V10]
+                    {V10[1], V10[2]})
+                  , (fun [V11]
+                    (case [V11] [
+                      V12 => <1: V12>
+                      V13 => <2: V13>
+                      ]))
+                  }
+                , { (fun [V14]
+                    {V14[0], V14[3]})
+                  , (fun [V15]
+                    (case [V15] [
+                      V16 => <0: V16>
+                      V17 => <3: V17>
+                      ]))
+                  }
                 }))
-              { (fun [V15, V16]
-                {V15, V16})
+              { (fun [V19, V20]
+                {V19, V20})
               , (ty_fun [Type]
-                (fun [V17, V18, V19]
-                  (case [V19] [
-                    V20 => (V17 V20)
-                    V21 => (V18 V21)
+                (fun [V21, V22, V23]
+                  (case [V23] [
+                    V24 => (V21 V24)
+                    V25 => (V22 V25)
                     ])))
-              , {(fun [V22] V22[0]), (fun [V23] ((fun [V24] <0: V24>) V23))}
-              , {(fun [V25] V25[1]), (fun [V26] ((fun [V27] <1: V27>) V26))}
+              , {(fun [V26] V26[0]), (fun [V27] ((fun [V28] <0: V28>) V27))}
+              , {(fun [V29] V29[1]), (fun [V30] ((fun [V31] <1: V31>) V30))}
               }))
-            { (fun [V29, V30]
-              {V30[0], V29[0], V29[1], V30[1]})
+            { (fun [V33, V34]
+              {V33, V34})
             , (ty_fun [Type]
-              (fun [V31, V32, V33]
-                (case [V33] [
-                  V34 => (V32 <0: V34>)
-                  V35 => (V31 <0: V35>)
-                  V36 => (V31 <1: V36>)
-                  V37 => (V32 <1: V37>)
+              (fun [V35, V36, V37]
+                (case [V37] [
+                  V38 => (V35 V38)
+                  V39 => (V36 V39)
                   ])))
-            , { (fun [V38]
-                {V38[1], V38[2]})
-              , (fun [V39]
-                (case [V39] [
-                  V40 => <1: V40>
-                  V41 => <2: V41>
-                  ]))
-              }
-            , { (fun [V42]
-                {V42[0], V42[3]})
-              , (fun [V43]
-                (case [V43] [
-                  V44 => <0: V44>
-                  V45 => <3: V45>
-                  ]))
-              }
+            , {(fun [V40] V40[0]), (fun [V41] ((fun [V42] <0: V42>) V41))}
+            , {(fun [V43] V43[1]), (fun [V44] ((fun [V45] <1: V45>) V44))}
             }))"#]];
     expect_ir.assert_eq(&pretty_string(ir, 80));
 
@@ -1123,12 +1177,12 @@ mod tests {
 
   #[test]
   fn lower_big_sum() {
-    let ast = Ast::branch(
-      Ast::branch(
+    let ast = Ast::branch_(
+      Ast::branch_(
         Ast::fun(ast::Var(0), Ast::unlabel(Ast::Var(ast::Var(0)), "x")),
         Ast::fun(ast::Var(1), Ast::unlabel(Ast::Var(ast::Var(1)), "y")),
       ),
-      Ast::branch(
+      Ast::branch_(
         Ast::fun(
           ast::Var(2),
           Ast::app(Ast::unlabel(Ast::Var(ast::Var(2)), "a"), Ast::Int(1)),
@@ -1143,62 +1197,65 @@ mod tests {
 
     let expect_ir = expect_test::expect![[r#"
         (ty_fun [Type]
-          ((fun [V28]
-            ((fun [V14]
+          ((fun [V34]
+            ((fun [V18]
               ((fun [V0]
-                ((ty_app [V28[1]] T0)
-                  ((ty_app [V14[1]] T0)
-                    (fun [V46]
-                      V46) (fun [V47]
-                      V47)) ((ty_app [V0[1]] T0) (fun [V48] (V48 1)) (fun [V49] V49))))
+                ((ty_app [V0[1]] Ty(T0))
+                  ((ty_app [V18[1]] Ty(T0))
+                    (fun [V32]
+                      V32) (fun [V33]
+                      V33)) ((ty_app [V34[1]] Ty(T0))
+                    (fun [V48]
+                      (V48 1)) (fun [V49]
+                      V49))))
                 { (fun [V1, V2]
-                  {V1, V2})
+                  {V2[0], V1[0], V1[1], V2[1]})
                 , (ty_fun [Type]
                   (fun [V3, V4, V5]
                     (case [V5] [
-                      V6 => (V3 V6)
-                      V7 => (V4 V7)
+                      V6 => (V4 <0: V6>)
+                      V7 => (V3 <0: V7>)
+                      V8 => (V3 <1: V8>)
+                      V9 => (V4 <1: V9>)
                       ])))
-                , {(fun [V8] V8[0]), (fun [V9] ((fun [V10] <0: V10>) V9))}
-                , {(fun [V11] V11[1]), (fun [V12] ((fun [V13] <1: V13>) V12))}
+                , { (fun [V10]
+                    {V10[1], V10[2]})
+                  , (fun [V11]
+                    (case [V11] [
+                      V12 => <1: V12>
+                      V13 => <2: V13>
+                      ]))
+                  }
+                , { (fun [V14]
+                    {V14[0], V14[3]})
+                  , (fun [V15]
+                    (case [V15] [
+                      V16 => <0: V16>
+                      V17 => <3: V17>
+                      ]))
+                  }
                 }))
-              { (fun [V15, V16]
-                {V15, V16})
+              { (fun [V19, V20]
+                {V19, V20})
               , (ty_fun [Type]
-                (fun [V17, V18, V19]
-                  (case [V19] [
-                    V20 => (V17 V20)
-                    V21 => (V18 V21)
+                (fun [V21, V22, V23]
+                  (case [V23] [
+                    V24 => (V21 V24)
+                    V25 => (V22 V25)
                     ])))
-              , {(fun [V22] V22[0]), (fun [V23] ((fun [V24] <0: V24>) V23))}
-              , {(fun [V25] V25[1]), (fun [V26] ((fun [V27] <1: V27>) V26))}
+              , {(fun [V26] V26[0]), (fun [V27] ((fun [V28] <0: V28>) V27))}
+              , {(fun [V29] V29[1]), (fun [V30] ((fun [V31] <1: V31>) V30))}
               }))
-            { (fun [V29, V30]
-              {V30[0], V29[0], V29[1], V30[1]})
+            { (fun [V35, V36]
+              {V35, V36})
             , (ty_fun [Type]
-              (fun [V31, V32, V33]
-                (case [V33] [
-                  V34 => (V32 <0: V34>)
-                  V35 => (V31 <0: V35>)
-                  V36 => (V31 <1: V36>)
-                  V37 => (V32 <1: V37>)
-                  ])))
-            , { (fun [V38]
-                {V38[1], V38[2]})
-              , (fun [V39]
+              (fun [V37, V38, V39]
                 (case [V39] [
-                  V40 => <1: V40>
-                  V41 => <2: V41>
-                  ]))
-              }
-            , { (fun [V42]
-                {V42[0], V42[3]})
-              , (fun [V43]
-                (case [V43] [
-                  V44 => <0: V44>
-                  V45 => <3: V45>
-                  ]))
-              }
+                  V40 => (V37 V40)
+                  V41 => (V38 V41)
+                  ])))
+            , {(fun [V42] V42[0]), (fun [V43] ((fun [V44] <0: V44>) V43))}
+            , {(fun [V45] V45[1]), (fun [V46] ((fun [V47] <1: V47>) V46))}
             }))"#]];
     expect_ir.assert_eq(&pretty_string(ir, 80));
 

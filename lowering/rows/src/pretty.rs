@@ -1,5 +1,7 @@
 use pretty::{DocAllocator, DocBuilder, Pretty};
 
+use crate::{Row, TyApp};
+
 use super::{Kind, Type, TypeVar, Var, VarId, IR};
 
 impl<'a, D, A> Pretty<'a, D, A> for VarId
@@ -66,6 +68,34 @@ where
   }
 }
 
+impl<'a, D> Pretty<'a, D> for Row
+where
+    D: DocAllocator<'a>,
+    DocBuilder<'a, D>: Clone + 'a,
+{
+    fn pretty(self, a: &'a D) -> DocBuilder<'a, D, ()> {
+        match self {
+            Row::Open(var) => var.pretty(a),
+            Row::Closed(tys) => {
+          let single = a
+            .intersperse(
+              tys.clone().into_iter().map(|ty| ty.pretty(a)),
+              a.text(",").append(a.space()),
+            );
+          let multi = a
+            .space()
+            .append(a.intersperse(
+              tys.into_iter().map(|ty| ty.pretty(a)),
+              a.hardline().append(a.text(", ")),
+            ))
+            .append(a.hardline())
+            .align();
+          multi.flat_alt(single).group()
+            }
+        }
+    }
+}
+
 impl<'a, D> Pretty<'a, D> for Type
 where
   D: DocAllocator<'a>,
@@ -96,42 +126,23 @@ where
           .append(".")
           .append(a.line().append(ty.pretty(a).group()).nest(2))
       }
-      Type::Prod(tys) => {
-        let single = a
-          .intersperse(
-            tys.clone().into_iter().map(|ty| ty.pretty(a)),
-            a.text(",").append(a.space()),
-          )
-          .braces();
-        let multi = a
-          .space()
-          .append(a.intersperse(
-            tys.into_iter().map(|ty| ty.pretty(a)),
-            a.hardline().append(a.text(", ")),
-          ))
-          .append(a.hardline())
-          .braces()
-          .align();
-        multi.flat_alt(single).group()
-      }
-      Type::Sum(tys) => {
-        let single = a
-          .intersperse(
-            tys.clone().into_iter().map(|ty| ty.pretty(a)),
-            a.text(",").append(a.space()),
-          )
-          .angles();
-        let multi = a
-          .space()
-          .append(a.intersperse(
-            tys.into_iter().map(|ty| ty.pretty(a)),
-            a.hardline().append(a.text(",")).append(a.space()),
-          ))
-          .angles();
-        multi.flat_alt(single).group()
-      }
+      Type::Prod(row) => row.pretty(a).braces(),
+      Type::Sum(row) => row.pretty(a).angles(),
     }
   }
+}
+
+impl<'a, D> Pretty<'a, D> for TyApp 
+where
+  D: DocAllocator<'a>,
+  DocBuilder<'a, D>: Clone + 'a,
+{
+    fn pretty(self, a: &'a D) -> DocBuilder<'a, D, ()> {
+        match self {
+            TyApp::Ty(ty) => a.text("Ty").append(ty.pretty(a).parens()),
+            TyApp::Row(row) => a.text("Row").append(row.pretty(a).parens()),
+        }
+    }
 }
 
 impl IR {
@@ -164,7 +175,7 @@ impl IR {
     }
   }
 
-  fn collect_tyapp_tys(self, tys: &mut Vec<Type>) -> IR {
+  fn collect_tyapp_tys(self, tys: &mut Vec<TyApp>) -> IR {
     if let IR::TyApp(body, ty) = self {
       tys.push(ty);
       body.collect_tyapp_tys(tys)
