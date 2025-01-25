@@ -1,18 +1,22 @@
 #![allow(dead_code)]
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use types_items::{self as ast, Ast, Evidence, ItemId, TypedVar};
+use types_items::{self as ast, Ast, Evidence, TypedVar};
 
 mod pretty;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 struct VarId(u32);
 
+#[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
+struct ItemId(u32);
+
 #[derive(Debug, Eq, PartialEq, Clone)]
 struct Var {
   id: VarId,
   ty: Type,
 }
+
 
 impl Var {
   fn new(id: VarId, ty: Type) -> Self {
@@ -340,6 +344,32 @@ impl VarSupply {
     let ir_var = self.next;
     self.next += 1;
     VarId(ir_var)
+  }
+}
+
+#[derive(Default)]
+struct ItemSupply {
+  next: u32,
+  cache: HashMap<ast::ItemId, ItemId>,
+}
+
+impl ItemSupply {
+  fn supply_for(&mut self, item: ast::ItemId) -> ItemId {
+    self
+      .cache
+      .entry(item)
+      .or_insert_with(|| {
+        let ir_item = self.next;
+        self.next += 1;
+        ItemId(ir_item)
+      })
+      .to_owned()
+  }
+
+  fn supply(&mut self) -> VarId {
+    let ir_item = self.next;
+    self.next += 1;
+    VarId(ir_item)
   }
 }
 
@@ -753,8 +783,9 @@ struct LowerAst {
   supply: VarSupply,
   types: LowerTypes,
   ev_to_var: HashMap<Evidence, Var>,
-  item_source: ItemSource,
   solved: Vec<(Var, IR)>,
+  item_source: ItemSource,
+  item_supply: ItemSupply,
 }
 
 impl LowerAst {
@@ -896,7 +927,7 @@ impl LowerAst {
       Ast::Item(wrapper, item_id) => {
         let ty = self.item_source.lookup_item(item_id);
         println!("{}\n{:?}", pretty_string(ty.clone(), 80), wrapper);
-        let item_ir = IR::Item(ty, item_id);
+        let item_ir = IR::Item(ty, self.item_supply.supply_for(item_id));
         let wrapper = wrapper.expect("ICE: Item lacks expected wrapper");
         let ty_ir = wrapper.types.into_iter().fold(item_ir, |ir, ty| {
           IR::ty_app(ir, TyApp::Ty(self.types.lower_ty(ty)))
@@ -916,10 +947,10 @@ impl LowerAst {
 }
 
 struct ItemSource {
-  items: HashMap<ItemId, Type>,
+  items: HashMap<ast::ItemId, Type>,
 }
 impl ItemSource {
-  fn lookup_item(&self, item: ItemId) -> Type {
+  fn lookup_item(&self, item: ast::ItemId) -> Type {
     self.items[&item].clone()
   }
 }
@@ -968,6 +999,7 @@ fn lower_with_items(
     ev_to_var,
     solved: vec![],
     item_source: lower_item_source(item_source),
+    item_supply: ItemSupply::default(),
   };
   let ir = lower_ast.lower_ast(ast);
   let solved_ir = lower_ast
@@ -1349,7 +1381,7 @@ mod tests {
   #[test]
   fn lower_items() {
     let items = ast::ItemSource::from_iter([(
-      ItemId(0),
+      ast::ItemId(0),
       TypeScheme {
         unbound_rows: set![RowVar(9), RowVar(11)],
         unbound_tys: set![ast::TypeVar(3)],
@@ -1372,7 +1404,7 @@ mod tests {
     )]);
     let ast = Ast::app(
       Ast::app(
-        Ast::Item(None, ItemId(0)),
+        Ast::Item(None, ast::ItemId(0)),
         Ast::concat_(Ast::label("y", Ast::Int(4)), Ast::label("z", Ast::Int(6))),
       ),
       Ast::fun(ast::Var(0), Ast::Var(ast::Var(0))),
