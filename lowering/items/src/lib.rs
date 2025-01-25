@@ -158,7 +158,7 @@ enum TyApp {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum IR {
+pub enum IR {
   Var(Var),
   Int(isize),
   Fun(Var, Box<Self>),
