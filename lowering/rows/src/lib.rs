@@ -438,42 +438,39 @@ impl LowerTypes {
   }
 
   fn lower_ev_ty(&self, evidence: ast::Evidence) -> Type {
-    match evidence {
-      ast::Evidence::RowEquation { left, right, goal } => {
-        let left = self.lower_row_ty(left);
-        let (left_prod, left_sum) = (Type::prod(left.clone()), Type::sum(left));
-        let right = self.lower_row_ty(right);
-        let (right_prod, right_sum) = (Type::prod(right.clone()), Type::sum(right));
-        let goal = self.lower_row_ty(goal);
-        let (goal_prod, goal_sum) = (Type::prod(goal.clone()), Type::sum(goal));
+    let ast::Evidence::RowEquation { left, right, goal } = evidence;
+    let left = self.lower_row_ty(left);
+    let (left_prod, left_sum) = (Type::prod(left.clone()), Type::sum(left));
+    let right = self.lower_row_ty(right);
+    let (right_prod, right_sum) = (Type::prod(right.clone()), Type::sum(right));
+    let goal = self.lower_row_ty(goal);
+    let (goal_prod, goal_sum) = (Type::prod(goal.clone()), Type::sum(goal));
 
-        let concat = Type::funs([left_prod.clone(), right_prod.clone()], goal_prod.clone());
-        let branch = {
-          let a = TypeVar(0);
-          Type::ty_fun(
-            Kind::Type,
-            Type::funs(
-              [
-                Type::fun(left_sum.clone().shifted(), Type::Var(a)),
-                Type::fun(right_sum.clone().shifted(), Type::Var(a)),
-                goal_sum.clone().shifted(),
-              ],
-              Type::Var(a),
-            ),
-          )
-        };
-        let prj_left = Type::fun(goal_prod.clone(), left_prod);
-        let inj_left = Type::fun(left_sum, goal_sum.clone());
-        let prj_right = Type::fun(goal_prod, right_prod);
-        let inj_right = Type::fun(right_sum, goal_sum);
-        Type::prod(Row::Closed(vec![
-          concat,
-          branch,
-          Type::prod(Row::Closed(vec![prj_left, inj_left])),
-          Type::prod(Row::Closed(vec![prj_right, inj_right])),
-        ]))
-      }
-    }
+    let concat = Type::funs([left_prod.clone(), right_prod.clone()], goal_prod.clone());
+    let branch = {
+      let a = TypeVar(0);
+      Type::ty_fun(
+        Kind::Type,
+        Type::funs(
+          [
+            Type::fun(left_sum.clone().shifted(), Type::Var(a)),
+            Type::fun(right_sum.clone().shifted(), Type::Var(a)),
+            goal_sum.clone().shifted(),
+          ],
+          Type::Var(a),
+        ),
+      )
+    };
+    let prj_left = Type::fun(goal_prod.clone(), left_prod);
+    let inj_left = Type::fun(left_sum, goal_sum.clone());
+    let prj_right = Type::fun(goal_prod, right_prod);
+    let inj_right = Type::fun(right_sum, goal_sum);
+    Type::prod(Row::Closed(vec![
+      concat,
+      branch,
+      Type::prod(Row::Closed(vec![prj_left, inj_left])),
+      Type::prod(Row::Closed(vec![prj_right, inj_right])),
+    ]))
   }
 }
 
