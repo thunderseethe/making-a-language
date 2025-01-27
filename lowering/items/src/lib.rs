@@ -6,14 +6,14 @@ use types_items::{self as ast, Ast, Evidence, TypedVar};
 mod pretty;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-struct VarId(u32);
+pub struct VarId(u32);
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-struct ItemId(u32);
+pub struct ItemId(u32);
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-struct Var {
-  id: VarId,
+pub struct Var {
+  pub id: VarId,
   ty: Type,
 }
 
@@ -25,22 +25,22 @@ impl Var {
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-struct TypeVar(usize);
+pub struct TypeVar(usize);
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-enum Kind {
+pub enum Kind {
   Type,
   Row,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum Row {
+pub enum Row {
   Open(TypeVar),
   Closed(Vec<Type>),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum Type {
+pub enum Type {
   Int,
   Var(TypeVar),
   Fun(Box<Self>, Box<Self>),
@@ -156,7 +156,7 @@ impl Subst {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum TyApp {
+pub enum TyApp {
   Ty(Type),
   Row(Row),
 }
@@ -181,7 +181,7 @@ pub enum IR {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-struct Branch {
+pub struct Branch {
   param: Var,
   body: IR,
 }
@@ -193,7 +193,7 @@ impl Branch {
 }
 
 impl IR {
-  fn fun(var: Var, body: Self) -> Self {
+  pub fn fun(var: Var, body: Self) -> Self {
     Self::Fun(var, Box::new(body))
   }
 
@@ -205,7 +205,7 @@ impl IR {
     vars.into_iter().rfold(body, |body, var| IR::fun(var, body))
   }
 
-  fn app(fun: Self, arg: Self) -> Self {
+  pub fn app(fun: Self, arg: Self) -> Self {
     Self::App(Box::new(fun), Box::new(arg))
   }
 
