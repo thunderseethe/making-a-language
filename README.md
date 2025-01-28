@@ -7,8 +7,8 @@ Each crate has at least one associated article in the making a language series (
 The stages in the compiler:
 
 * [types](/types) - Type inference and checking
-  * [base](/base) - The initial base type checker.
-  * [rows](/rows) - Extends base with support for datatypes via row types.
-  * [items](/items) - Extends rows with support for checking top level functions.
+  * [base](/types/base) - The initial base type checker.
+  * [rows](/types/rows) - Extends base with support for datatypes via row types.
+  * [items](/types/items) - Extends rows with support for checking top level functions.
 * [lowering](/lowering) - Lowering into our intermediate representation (IR)
-  * [base](/base) - Lowering the AST of our base type checker.
+  * [base](/types/base) - Lowering the AST of our base type checker.
