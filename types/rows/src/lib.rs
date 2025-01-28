@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 use ena::unify::InPlaceUnificationTable;
 
@@ -38,8 +38,8 @@ enum Evidence {
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 struct TypeScheme {
-  unbound_rows: HashSet<RowVar>,
-  unbound_tys: HashSet<TypeVar>,
+  unbound_rows: BTreeSet<RowVar>,
+  unbound_tys: BTreeSet<TypeVar>,
   evidence: Vec<Evidence>,
   ty: Type,
 }
@@ -155,9 +155,9 @@ mod tests {
   use super::*;
 
   macro_rules! set {
-        () => {{ HashSet::new() }};
+        () => {{ BTreeSet::new() }};
         ($($ele:expr),*) => {{
-            let mut tmp = HashSet::new();
+            let mut tmp = BTreeSet::new();
             $(tmp.insert($ele);)*
             tmp
         }};

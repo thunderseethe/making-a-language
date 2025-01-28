@@ -1,0 +1,11 @@
+[package]
+name = "lowering-base"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+expect-test.workspace = true
+
+[dependencies]
+types-base.workspace = true
+pretty.workspace = true
