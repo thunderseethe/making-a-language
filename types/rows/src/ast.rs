@@ -1,4 +1,5 @@
 use crate::ty::Type;
+use crate::Evidence;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 pub struct Var(pub usize);
@@ -36,13 +37,19 @@ pub enum Ast<V> {
   // Unwrap a singleton row into it's underlying value
   Unlabel(Box<Self>, Label),
   // Concat two products
-  Concat(Box<Self>, Box<Self>),
+  Concat(Option<Evidence>, Box<Self>, Box<Self>),
   // Project a product into a sub product
-  Project(Direction, Box<Self>),
+  Project(Option<Evidence>, Direction, Box<Self>),
   // Branch on a sum type to two handler functions
-  Branch(Box<Self>, Box<Self>),
+  Branch(Option<BranchMeta>, Box<Self>, Box<Self>),
   // Inject a value into a sum type
-  Inject(Direction, Box<Self>),
+  Inject(Option<Evidence>, Direction, Box<Self>),
+}
+
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct BranchMeta {
+  pub evidence: Evidence,
+  pub ty: Type
 }
 
 impl<V> Ast<V> {
@@ -62,19 +69,37 @@ impl<V> Ast<V> {
     Self::Unlabel(Box::new(value), label.to_string())
   }
 
-  pub fn project(dir: Direction, value: Self) -> Self {
-    Self::Project(dir, Box::new(value))
+  pub fn project(meta: Evidence, dir: Direction, value: Self) -> Self {
+    Self::Project(Some(meta), dir, Box::new(value))
   }
 
-  pub fn concat(left: Self, right: Self) -> Self {
-    Self::Concat(Box::new(left), Box::new(right))
+  pub fn concat(meta: Evidence, left: Self, right: Self) -> Self {
+    Self::Concat(Some(meta), Box::new(left), Box::new(right))
   }
 
-  pub fn inject(dir: Direction, value: Self) -> Self {
-    Self::Inject(dir, Box::new(value))
+  pub fn inject(meta: Evidence, dir: Direction, value: Self) -> Self {
+    Self::Inject(Some(meta), dir, Box::new(value))
   }
 
-  pub fn branch(left: Self, right: Self) -> Self {
-    Self::Branch(Box::new(left), Box::new(right))
+  pub fn branch(meta: BranchMeta, left: Self, right: Self) -> Self {
+    Self::Branch(Some(meta), Box::new(left), Box::new(right))
+  }
+}
+
+impl Ast<Var> {
+  pub fn project_(dir: Direction, value: Self) -> Self {
+    Self::Project(None, dir, Box::new(value))
+  }
+
+  pub fn concat_(left: Self, right: Self) -> Self {
+    Self::Concat(None, Box::new(left), Box::new(right))
+  }
+
+  pub fn inject_(dir: Direction, value: Self) -> Self {
+    Self::Inject(None, dir, Box::new(value))
+  }
+
+  pub fn branch_(left: Self, right: Self) -> Self {
+    Self::Branch(None, Box::new(left), Box::new(right))
   }
 }

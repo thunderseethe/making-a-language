@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
 use ena::unify::InPlaceUnificationTable;
 
@@ -29,7 +29,6 @@ pub struct TypeInference {
   unification_table: InPlaceUnificationTable<TypeVar>,
   row_unification_table: InPlaceUnificationTable<RowVar>,
   partial_row_combs: BTreeSet<RowCombination>,
-  ast_to_row_comb: HashMap<Ast<TypedVar>, (RowCombination, Type)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -45,14 +44,11 @@ pub struct TypeScheme {
   pub ty: Type,
 }
 
-type TypeInferOut = (Ast<TypedVar>, TypeScheme, HashMap<Ast<TypedVar>, (Evidence, Type)>);
-
-pub fn type_infer(ast: Ast<Var>) -> Result<TypeInferOut, TypeError> {
+pub fn type_infer(ast: Ast<Var>) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
   let mut ctx = TypeInference {
     unification_table: InPlaceUnificationTable::default(),
     row_unification_table: InPlaceUnificationTable::default(),
     partial_row_combs: BTreeSet::default(),
-    ast_to_row_comb: HashMap::default(),
   };
 
   // Constraint generation
@@ -137,19 +133,6 @@ pub fn type_infer(ast: Ast<Var>) -> Result<TypeInferOut, TypeError> {
     })
     .collect();
 
-  let ast_to_row_comb = std::mem::take(&mut ctx.ast_to_row_comb)
-    .into_iter()
-    .map(|(key, (row_combo, ty))| {
-      let out = ctx
-        .substitute_ast(key)
-        .merge(ctx.substitute_row_comb(row_combo), |k, v| (k, v))
-        .merge(ctx.substitute_ty(ty), |(k, combo), ty| (k, (combo, ty)));
-      ev_out.unbound_tys.extend(out.unbound_tys);
-      ev_out.unbound_rows.extend(out.unbound_rows);
-      out.value
-    })
-    .collect();
-
   let subst_out = subst_out.merge(ev_out, |l, _| l);
   // Return our typed ast and it's type scheme
   Ok((
@@ -160,7 +143,6 @@ pub fn type_infer(ast: Ast<Var>) -> Result<TypeInferOut, TypeError> {
       evidence,
       ty: subst_out.value.0,
     },
-    ast_to_row_comb,
   ))
 }
 
@@ -286,7 +268,7 @@ mod tests {
       Ast::fun(
         n,
         Ast::unlabel(
-          Ast::project(Direction::Left, Ast::concat(Ast::Var(m), Ast::Var(n))),
+          Ast::project_(Direction::Left, Ast::concat_(Ast::Var(m), Ast::Var(n))),
           "x",
         ),
       ),
@@ -335,8 +317,8 @@ mod tests {
         Ast::fun(
           x,
           Ast::app(
-            Ast::branch(Ast::Var(f), Ast::Var(g)),
-            Ast::inject(Direction::Right, Ast::label("Con", Ast::Var(x))),
+            Ast::branch_(Ast::Var(f), Ast::Var(g)),
+            Ast::inject_(Direction::Right, Ast::label("Con", Ast::Var(x))),
           ),
         ),
       ),
