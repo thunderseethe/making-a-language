@@ -474,7 +474,14 @@ impl LowerTypes {
   }
 }
 
-fn lower_ty_scheme(scheme: ast::TypeScheme) -> (Type, Vec<Kind>, LowerTypes) {
+struct LoweredTyScheme {
+  scheme: Type,
+  lower_types: LowerTypes,
+  kinds: Vec<Kind>,
+  ev_to_ty: HashMap<ast::Evidence, Type>,
+}
+
+fn lower_ty_scheme(scheme: ast::TypeScheme) -> LoweredTyScheme {
   let mut kinds = vec![Kind::Type; scheme.unbound_tys.len() + scheme.unbound_rows.len()];
   let ty_env: TypeEnv = scheme
     .unbound_tys
@@ -492,18 +499,26 @@ fn lower_ty_scheme(scheme: ast::TypeScheme) -> (Type, Vec<Kind>, LowerTypes) {
   let lower = LowerTypes { env: ty_env };
 
   let lower_ty = lower.lower_ty(scheme.ty);
-  let evident_lower_ty = Type::funs(
-    scheme
-      .evidence
-      .into_iter()
-      .map(|ev| lower.lower_ev_ty(ev))
-      .collect::<Vec<_>>(),
-    lower_ty,
-  );
+  let mut ev_to_ty = HashMap::new();
+  let ev_tys = scheme
+    .evidence
+    .into_iter()
+    .map(|ev| {
+      let ty = lower.lower_ev_ty(ev.clone());
+      ev_to_ty.insert(ev, ty.clone());
+      ty
+    })
+    .collect::<Vec<_>>();
+  let evident_lower_ty = Type::funs(ev_tys, lower_ty);
   let bound_lower_ty = kinds
     .iter()
     .fold(evident_lower_ty, |ty, kind| Type::ty_fun(*kind, ty));
-  (bound_lower_ty, kinds, lower)
+  LoweredTyScheme {
+    scheme: bound_lower_ty,
+    lower_types: lower,
+    kinds,
+    ev_to_ty
+  }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -800,6 +815,7 @@ impl LowerAst {
 
         let term = lower_solved_ev.lower_ev_term();
         let ty = self.types.lower_ev_ty(ev.clone());
+        debug_assert_eq!(ty, term.type_of(), "Evidence term did not have the type expected by lower_ev_ty");
         let var = Var::new(param, ty);
         self.solved.push((var.clone(), term));
         var
@@ -880,25 +896,22 @@ impl LowerAst {
 }
 
 fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
-  let ev = scheme.evidence.clone();
-  let (ir_ty, kinds, lower_ty) = lower_ty_scheme(scheme);
-
+  let lowered_scheme = lower_ty_scheme(scheme);
   let mut supply = VarSupply::default();
-  let mut ev_to_var: HashMap<ast::Evidence, Var> = HashMap::default();
-  let params = ev
+  let mut params = vec![];
+  let ev_to_var = lowered_scheme.ev_to_ty
     .into_iter()
-    .map(|ev| {
-      let ty = lower_ty.lower_ev_ty(ev.clone());
+    .map(|(ev, ty)| {
       let param = supply.supply();
       let var = Var::new(param, ty);
-      ev_to_var.insert(ev, var.clone());
-      var
+      params.push(var.clone());
+      (ev, var)
     })
-    .collect::<Vec<_>>();
+    .collect();
 
   let mut lower_ast = LowerAst {
     supply,
-    types: lower_ty,
+    types: lowered_scheme.lower_types,
     ev_to_var,
     solved: vec![],
   };
@@ -910,10 +923,10 @@ fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
   let param_ir = params
     .into_iter()
     .rfold(solved_ir, |ir, var| IR::fun(var, ir));
-  let bound_ir = kinds
+  let bound_ir = lowered_scheme.kinds
     .into_iter()
     .fold(param_ir, |ir, kind| IR::ty_fun(kind, ir));
-  (bound_ir, ir_ty)
+  (bound_ir, lowered_scheme.scheme)
 }
 
 fn pretty_string<'a>(
