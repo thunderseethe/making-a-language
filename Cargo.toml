@@ -5,15 +5,14 @@ members = [
   "lowering/items",
   "types/base",
   "types/items",
-  "types/rows", 
-  "inlining", 
+  "types/rows", "simplification/base", 
 ]
 
 [workspace.dependencies]
 types-base = { path = "types/base" }
 types-rows = { path = "types/rows" }
 types-items = { path = "types/items" }
-lowering-items = { path = "lowering/items" }
+lowering-base = { path = "lowering/base" }
 ena = "0.14.2"
 im = "15.1"
 pretty_assertions = "1.4"

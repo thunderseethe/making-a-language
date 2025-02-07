@@ -7,7 +7,7 @@ use types_base::{self as ast, Ast, TypedVar};
 struct VarId(usize);
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-struct Var {
+pub struct Var {
   id: VarId,
   ty: Type,
 }
@@ -16,18 +16,25 @@ impl Var {
   fn new(id: VarId, ty: Type) -> Self {
     Self { id, ty }
   }
+
+  pub fn map_ty(self, f: impl FnOnce(Type) -> Type) -> Self {
+    Self {
+      ty: f(self.ty),
+      ..self
+    }
+  }
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-struct TypeVar(usize);
+pub struct TypeVar(usize);
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-enum Kind {
+pub enum Kind {
   Type,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum Type {
+pub enum Type {
   Int,
   Var(TypeVar),
   Fun(Box<Self>, Box<Self>),
@@ -115,13 +122,13 @@ impl Type {
     Self::TyFun(kind, Box::new(body))
   }
 
-  fn subst_ty(self, ty: Self) -> Self {
+  pub fn subst_ty(self, ty: Self) -> Self {
     Subst::TyPayload(ty).subst_ty(self, 0)
   }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum IR {
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum IR {
   Var(Var),
   Int(isize),
   Fun(Var, Box<Self>),
@@ -131,16 +138,20 @@ enum IR {
 }
 
 impl IR {
-  fn fun(var: Var, body: Self) -> Self {
+  pub fn fun(var: Var, body: Self) -> Self {
     Self::Fun(var, Box::new(body))
   }
 
-  fn app(fun: Self, arg: Self) -> Self {
+  pub fn app(fun: Self, arg: Self) -> Self {
     Self::App(Box::new(fun), Box::new(arg))
   }
 
-  fn ty_fun(kind: Kind, ir: Self) -> Self {
+  pub fn ty_fun(kind: Kind, ir: Self) -> Self {
     Self::TyFun(kind, Box::new(ir))
+  }
+
+  pub fn ty_app(ty_fun: Self, ty: Type) -> Self {
+    Self::TyApp(Box::new(ty_fun), ty)
   }
 
   fn type_of(&self) -> Type {

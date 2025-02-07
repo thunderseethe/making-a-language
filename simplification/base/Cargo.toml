@@ -1,7 +1,7 @@
 [package]
-name = "inlining"
+name = "base"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-lowering-items.workspace=true
+lowering-base.workspace = true
