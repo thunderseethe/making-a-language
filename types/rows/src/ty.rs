@@ -3,8 +3,9 @@ use std::collections::BTreeSet;
 use ena::unify::{EqUnifyValue, UnifyKey};
 
 use crate::ast::Label;
+use crate::Evidence;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClosedRow {
   pub fields: Vec<Label>,
   pub values: Vec<Type>,
@@ -64,7 +65,7 @@ impl ClosedRow {
 }
 impl EqUnifyValue for ClosedRow {}
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Row {
   Open(RowVar),
   Closed(ClosedRow),
@@ -95,7 +96,7 @@ impl Row {
 /// Our type
 /// Each AST node in our input will be annotated by a value of `Type`
 /// after type inference succeeeds.
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Hash)]
 pub enum Type {
   /// Type of integers
   Int,
@@ -226,5 +227,9 @@ impl RowCombination {
     let right_equatable = self.right.equatable(&other.left);
     let goal_equatable = self.goal.equatable(&other.goal);
     (goal_equatable && (left_equatable || right_equatable)) || (left_equatable && right_equatable)
+  }
+
+  pub fn into_evidence(self) -> Evidence {
+      Evidence::RowEquation { left: self.left, right: self.right, goal: self.goal }
   }
 }

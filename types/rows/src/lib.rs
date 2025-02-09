@@ -3,9 +3,9 @@ use std::collections::BTreeSet;
 
 use ena::unify::InPlaceUnificationTable;
 
-use self::ast::{Ast, TypedVar, Var};
+pub use self::ast::{Ast, Direction, TypedVar, Var};
 use self::subst::SubstOut;
-use self::ty::{Row, RowCombination, RowVar, Type, TypeVar};
+pub use self::ty::{ClosedRow, Row, RowCombination, RowVar, Type, TypeVar};
 use self::unification::TypeError;
 
 mod ast;
@@ -31,20 +31,20 @@ pub struct TypeInference {
   partial_row_combs: BTreeSet<RowCombination>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Evidence {
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Evidence {
   RowEquation { left: Row, right: Row, goal: Row },
 }
 
 #[derive(PartialEq, Eq, Clone, Debug)]
-struct TypeScheme {
-  unbound_rows: BTreeSet<RowVar>,
-  unbound_tys: BTreeSet<TypeVar>,
-  evidence: Vec<Evidence>,
-  ty: Type,
+pub struct TypeScheme {
+  pub unbound_rows: BTreeSet<RowVar>,
+  pub unbound_tys: BTreeSet<TypeVar>,
+  pub evidence: Vec<Evidence>,
+  pub ty: Type,
 }
 
-fn type_infer(ast: Ast<Var>) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
+pub fn type_infer(ast: Ast<Var>) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
   let mut ctx = TypeInference {
     unification_table: InPlaceUnificationTable::default(),
     row_unification_table: InPlaceUnificationTable::default(),
@@ -268,7 +268,7 @@ mod tests {
       Ast::fun(
         n,
         Ast::unlabel(
-          Ast::project(Direction::Left, Ast::concat(Ast::Var(m), Ast::Var(n))),
+          Ast::project_(Direction::Left, Ast::concat_(Ast::Var(m), Ast::Var(n))),
           "x",
         ),
       ),
@@ -317,8 +317,8 @@ mod tests {
         Ast::fun(
           x,
           Ast::app(
-            Ast::branch(Ast::Var(f), Ast::Var(g)),
-            Ast::inject(Direction::Right, Ast::label("Con", Ast::Var(x))),
+            Ast::branch_(Ast::Var(f), Ast::Var(g)),
+            Ast::inject_(Direction::Right, Ast::label("Con", Ast::Var(x))),
           ),
         ),
       ),
