@@ -1,0 +1,11 @@
+[package]
+name = "lowering-rows"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+types-rows.workspace = true
+pretty = "0.12.3"
+
+[dev-dependencies]
+expect-test = "1.5.0"
