@@ -9,7 +9,7 @@ mod pretty;
 struct VarId(u32);
 
 #[derive(Debug, Eq, PartialEq, Clone)]
-struct Var {
+pub struct Var {
   id: VarId,
   ty: Type,
 }
@@ -18,25 +18,42 @@ impl Var {
   fn new(id: VarId, ty: Type) -> Self {
     Self { id, ty }
   }
+
+  pub fn map_ty(self, f: impl FnOnce(Type) -> Type) -> Self {
+    Self {
+      ty: f(self.ty),
+      ..self
+    }
+  }
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-struct TypeVar(usize);
+pub struct TypeVar(usize);
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-enum Kind {
+pub enum Kind {
   Type,
   Row,
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum Row {
+pub enum Row {
   Open(TypeVar),
   Closed(Vec<Type>),
 }
 
+impl Row {
+  pub fn subst_ty(self, ty: Type) -> Self {
+    Subst::TyPayload(ty).subst_row(self, 0)
+  }
+
+  pub fn subst_row(self, row: Self) -> Self {
+    Subst::RowPayload(row).subst_row(self, 0)
+  }
+}
+
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum Type {
+pub enum Type {
   Int,
   Var(TypeVar),
   Fun(Box<Self>, Box<Self>),
@@ -75,11 +92,11 @@ impl Type {
     }
   }
 
-  fn subst_row(self, row: Row) -> Self {
+  pub fn subst_row(self, row: Row) -> Self {
     Subst::RowPayload(row).subst_ty(self, 0)
   }
 
-  fn subst_ty(self, ty: Self) -> Self {
+  pub fn subst_ty(self, ty: Self) -> Self {
     Subst::TyPayload(ty).subst_ty(self, 0)
   }
 }
@@ -152,13 +169,13 @@ impl Subst {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum TyApp {
+pub enum TyApp {
   Ty(Type),
   Row(Row),
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-enum IR {
+pub enum IR {
   Var(Var),
   Int(isize),
   Fun(Var, Box<Self>),
@@ -176,9 +193,9 @@ enum IR {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-struct Branch {
-  param: Var,
-  body: IR,
+pub struct Branch {
+  pub param: Var,
+  pub body: IR,
 }
 
 impl Branch {
@@ -188,7 +205,7 @@ impl Branch {
 }
 
 impl IR {
-  fn fun(var: Var, body: Self) -> Self {
+  pub fn fun(var: Var, body: Self) -> Self {
     Self::Fun(var, Box::new(body))
   }
 
@@ -200,31 +217,31 @@ impl IR {
     vars.into_iter().rfold(body, |body, var| IR::fun(var, body))
   }
 
-  fn app(fun: Self, arg: Self) -> Self {
+  pub fn app(fun: Self, arg: Self) -> Self {
     Self::App(Box::new(fun), Box::new(arg))
   }
 
-  fn ty_fun(kind: Kind, ir: Self) -> Self {
+  pub fn ty_fun(kind: Kind, ir: Self) -> Self {
     Self::TyFun(kind, Box::new(ir))
   }
 
-  fn ty_app(body: IR, ty: TyApp) -> IR {
+  pub fn ty_app(body: IR, ty: TyApp) -> IR {
     Self::TyApp(Box::new(body), ty)
   }
 
-  fn tuple(elems: impl IntoIterator<Item = Self>) -> IR {
+  pub fn tuple(elems: impl IntoIterator<Item = Self>) -> IR {
     Self::Tuple(elems.into_iter().collect())
   }
 
-  fn field(body: Self, index: usize) -> Self {
+  pub fn field(body: Self, index: usize) -> Self {
     Self::Field(Box::new(body), index)
   }
 
-  fn tag(ty: Type, tag: usize, body: Self) -> Self {
+  pub fn tag(ty: Type, tag: usize, body: Self) -> Self {
     Self::Tag(ty, tag, Box::new(body))
   }
 
-  fn case(ty: Type, scrutinee: Self, branch: impl IntoIterator<Item = Branch>) -> Self {
+  pub fn case(ty: Type, scrutinee: Self, branch: impl IntoIterator<Item = Branch>) -> Self {
     Self::Case(ty, Box::new(scrutinee), branch.into_iter().collect())
   }
 

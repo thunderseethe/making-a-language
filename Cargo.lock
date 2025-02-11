@@ -9,13 +9,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b62fc65de8e4e7f52534fb52b0f3ed04746ae267519eef2a83941e8085068b"
 
 [[package]]
-name = "base"
-version = "0.1.0"
-dependencies = [
- "lowering-base",
-]
-
-[[package]]
 name = "bitmaps"
 version = "2.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -140,6 +133,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6f97cdb2a36ed4183de61b2f824cc45c9f1037f28afe0a322e9fff4c108b5aaa"
 dependencies = [
  "rand_core",
+]
+
+[[package]]
+name = "simplify-base"
+version = "0.1.0"
+dependencies = [
+ "lowering-base",
+]
+
+[[package]]
+name = "simplify-rows"
+version = "0.1.0"
+dependencies = [
+ "lowering-rows",
 ]
 
 [[package]]
