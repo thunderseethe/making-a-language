@@ -246,6 +246,10 @@ impl IR {
     Self::Case(ty, Box::new(scrutinee), branch.into_iter().collect())
   }
 
+  pub fn local(var: Var, defn: Self, body: Self) -> Self {
+    Self::Local(var, Box::new(defn), Box::new(body))
+  }
+
   fn branch(param: Var, body: IR) -> Branch {
     Branch { param, body }
   }

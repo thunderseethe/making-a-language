@@ -1,5 +1,6 @@
 use lowering_rows::{Branch, Kind, Row, TyApp, Type, Var, IR};
 
+
 fn subst(haystack: IR, needle: Var, payload: IR) -> IR {
   match haystack {
     IR::Var(var) => {
@@ -21,6 +22,7 @@ fn subst(haystack: IR, needle: Var, payload: IR) -> IR {
     IR::Field(ir, indx) => todo!(),
     IR::Tag(_, _, ir) => todo!(),
     IR::Case(_, ir, vec) => todo!(),
+    IR::Local(var, defn, body) => todo!(),
   }
 }
 
@@ -55,6 +57,11 @@ fn subst_ty(haystack: IR, payload: Type) -> IR {
         param: branch.param.map_ty(|ty| ty.subst_ty(payload.clone())),
         body: subst_ty(branch.body, payload.clone()),
       }),
+    ),
+    IR::Local(var, defn, body) => IR::local(
+      var.map_ty(|ty| ty.subst_ty(payload.clone())),
+      subst_ty(*defn, payload.clone()), 
+      subst_ty(*body, payload)
     ),
   }
 }
@@ -91,6 +98,11 @@ fn subst_row(haystack: IR, payload: Row) -> IR {
         body: subst_row(branch.body, payload.clone()),
       }),
     ),
+    IR::Local(var, defn, body) => IR::local(
+      var.map_ty(|ty| ty.subst_row(payload.clone())),
+      subst_row(*defn, payload.clone()),
+      subst_row(*body, payload)
+    )
   }
 }
 
@@ -110,7 +122,7 @@ impl Simplifier {
           return IR::app(self.simplify(*fun), self.simplify(*arg));
         };
         self.app_subst_count += 1;
-        subst(*body, var, *arg)
+        IR::local(var, *arg, *body)
       }
       IR::TyApp(ty_fun, ty_app) => {
         let IR::TyFun(kind, body) = *ty_fun else {
@@ -131,7 +143,7 @@ impl Simplifier {
         elems[indx].clone()
       },
       IR::Case(ty, ir, branches) => {
-        let IR::Tag(ty, tag, body) = *ir else {
+        let IR::Tag(_, tag, body) = *ir else {
             return IR::case(ty, simplify(*ir), branches.into_iter().map(|branch| {
               Branch {
                 param: branch.param,
@@ -141,19 +153,22 @@ impl Simplifier {
         };
         self.case_tag_count += 1;
         let branch = branches[tag].clone();
-        todo!()
+        IR::local(branch.param, *body, branch.body)
       },
       IR::Fun(var, body) => IR::fun(var, self.simplify(*body)),
       IR::TyFun(kind, ir) => IR::ty_fun(kind, self.simplify(*ir)),
       IR::Tuple(elems) => IR::tuple(elems.into_iter().map(simplify)),
       IR::Tag(ty, tag, ir) => IR::tag(ty, tag, simplify(*ir)),
-      IR::Var(var) => todo!(),
-      IR::Int(_) => todo!(),
+      IR::Local(_, _, _) => todo!("make use of occurrence analysis"),
+      ir => ir,
     }
   }
 
   fn did_no_work(&self) -> bool {
-    self.app_subst_count == 0 && self.ty_app_subst_count == 0
+    self.app_subst_count == 0 
+        && self.ty_app_subst_count == 0
+        && self.tuple_field_count == 0
+        && self.case_tag_count == 0
   }
 }
 
