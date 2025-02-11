@@ -12,3 +12,4 @@ The stages in the compiler:
   * [items](/types/items) - Extends rows with support for checking top level functions.
 * [lowering](/lowering) - Lowering into our intermediate representation (IR)
   * [base](/lowering/base) - Lowering the AST of our base type checker.
+  * [rows](/lowering/rows) - Lowering our rows type checker using evidence passing.
