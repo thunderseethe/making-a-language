@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use types_rows::{self as ast, Ast, Evidence, TypedVar};
 
 mod pretty;
@@ -182,6 +182,7 @@ pub enum IR {
   App(Box<Self>, Box<Self>),
   TyFun(Kind, Box<Self>),
   TyApp(Box<Self>, TyApp),
+  Local(Var, Box<Self>, Box<Self>),
   // Create a product type.
   Tuple(Vec<Self>),
   // Select a field out of a product.
@@ -284,6 +285,12 @@ impl IR {
           }
         }
       }
+      IR::Local(v, defn, body) => {
+        if v.ty != defn.type_of() {
+          panic!("ICE: Type mismatch local variable has different type from it's definition.")
+        }
+        body.type_of()
+      }
       IR::Tuple(elems) => Type::Prod(Row::Closed(elems.iter().map(|ir| ir.type_of()).collect())),
       IR::Field(body, field) => {
         let Type::Prod(Row::Closed(elems)) = body.type_of() else {
@@ -296,7 +303,7 @@ impl IR {
           panic!("ICE: Tagged value with non sum type");
         };
 
-        if !body.type_of().eq(&elems[*tag]) {
+        if body.type_of() != elems[*tag] {
           panic!("ICE: Tagged value has element with the wrong type")
         };
 
@@ -418,10 +425,8 @@ impl Row {
   }
 }
 
-type TypeEnv = HashMap<AstTypeVar, TypeVar>;
-
 struct LowerTypes {
-  env: TypeEnv,
+  env: HashMap<AstTypeVar, TypeVar>,
 }
 impl LowerTypes {
   fn lower_closed_row_ty(&self, closed_row: ast::ClosedRow) -> Vec<Type> {
@@ -455,48 +460,52 @@ impl LowerTypes {
   }
 
   fn lower_ev_ty(&self, evidence: ast::Evidence) -> Type {
-    match evidence {
-      ast::Evidence::RowEquation { left, right, goal } => {
-        let left = self.lower_row_ty(left);
-        let (left_prod, left_sum) = (Type::prod(left.clone()), Type::sum(left));
-        let right = self.lower_row_ty(right);
-        let (right_prod, right_sum) = (Type::prod(right.clone()), Type::sum(right));
-        let goal = self.lower_row_ty(goal);
-        let (goal_prod, goal_sum) = (Type::prod(goal.clone()), Type::sum(goal));
+    let ast::Evidence::RowEquation { left, right, goal } = evidence;
+    let left = self.lower_row_ty(left);
+    let (left_prod, left_sum) = (Type::prod(left.clone()), Type::sum(left));
+    let right = self.lower_row_ty(right);
+    let (right_prod, right_sum) = (Type::prod(right.clone()), Type::sum(right));
+    let goal = self.lower_row_ty(goal);
+    let (goal_prod, goal_sum) = (Type::prod(goal.clone()), Type::sum(goal));
 
-        let concat = Type::funs([left_prod.clone(), right_prod.clone()], goal_prod.clone());
-        let branch = {
-          let a = TypeVar(0);
-          Type::ty_fun(
-            Kind::Type,
-            Type::funs(
-              [
-                Type::fun(left_sum.clone().shifted(), Type::Var(a)),
-                Type::fun(right_sum.clone().shifted(), Type::Var(a)),
-                goal_sum.clone().shifted(),
-              ],
-              Type::Var(a),
-            ),
-          )
-        };
-        let prj_left = Type::fun(goal_prod.clone(), left_prod);
-        let inj_left = Type::fun(left_sum, goal_sum.clone());
-        let prj_right = Type::fun(goal_prod, right_prod);
-        let inj_right = Type::fun(right_sum, goal_sum);
-        Type::prod(Row::Closed(vec![
-          concat,
-          branch,
-          Type::prod(Row::Closed(vec![prj_left, inj_left])),
-          Type::prod(Row::Closed(vec![prj_right, inj_right])),
-        ]))
-      }
-    }
+    let concat = Type::funs([left_prod.clone(), right_prod.clone()], goal_prod.clone());
+    let branch = {
+      let a = TypeVar(0);
+      Type::ty_fun(
+        Kind::Type,
+        Type::funs(
+          [
+            Type::fun(left_sum.clone().shifted(), Type::Var(a)),
+            Type::fun(right_sum.clone().shifted(), Type::Var(a)),
+            goal_sum.clone().shifted(),
+          ],
+          Type::Var(a),
+        ),
+      )
+    };
+    let prj_left = Type::fun(goal_prod.clone(), left_prod);
+    let inj_left = Type::fun(left_sum, goal_sum.clone());
+    let prj_right = Type::fun(goal_prod, right_prod);
+    let inj_right = Type::fun(right_sum, goal_sum);
+    Type::prod(Row::Closed(vec![
+      concat,
+      branch,
+      Type::prod(Row::Closed(vec![prj_left, inj_left])),
+      Type::prod(Row::Closed(vec![prj_right, inj_right])),
+    ]))
   }
 }
 
-fn lower_ty_scheme(scheme: ast::TypeScheme) -> (Type, Vec<Kind>, LowerTypes) {
+struct LoweredTyScheme {
+  scheme: Type,
+  lower_types: LowerTypes,
+  kinds: Vec<Kind>,
+  ev_to_ty: BTreeMap<ast::Evidence, Type>,
+}
+
+fn lower_ty_scheme(scheme: ast::TypeScheme) -> LoweredTyScheme {
   let mut kinds = vec![Kind::Type; scheme.unbound_tys.len() + scheme.unbound_rows.len()];
-  let ty_env: TypeEnv = scheme
+  let ty_env = scheme
     .unbound_tys
     .into_iter()
     .map(AstTypeVar::Ty)
@@ -512,18 +521,26 @@ fn lower_ty_scheme(scheme: ast::TypeScheme) -> (Type, Vec<Kind>, LowerTypes) {
   let lower = LowerTypes { env: ty_env };
 
   let lower_ty = lower.lower_ty(scheme.ty);
-  let evident_lower_ty = Type::funs(
-    scheme
-      .evidence
-      .into_iter()
-      .map(|ev| lower.lower_ev_ty(ev))
-      .collect::<Vec<_>>(),
-    lower_ty,
-  );
+  let mut ev_to_ty = BTreeMap::new();
+  let ev_tys = scheme
+    .evidence
+    .into_iter()
+    .map(|ev| {
+      let ty = lower.lower_ev_ty(ev.clone());
+      ev_to_ty.insert(ev, ty.clone());
+      ty
+    })
+    .collect::<Vec<_>>();
+  let evident_lower_ty = Type::funs(ev_tys, lower_ty);
   let bound_lower_ty = kinds
     .iter()
     .fold(evident_lower_ty, |ty, kind| Type::ty_fun(*kind, ty));
-  (bound_lower_ty, kinds, lower)
+  LoweredTyScheme {
+    scheme: bound_lower_ty,
+    lower_types: lower,
+    kinds,
+    ev_to_ty,
+  }
 }
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -540,8 +557,6 @@ struct LowerSolvedEv<'a> {
   goal: Vec<Type>,
 
   goal_indices: Vec<RowIndex>,
-  left_indices: Vec<usize>,
-  right_indices: Vec<usize>,
 }
 
 fn unwrap_single(len: usize, var: Var, else_fn: impl FnOnce(IR) -> IR) -> IR {
@@ -585,21 +600,46 @@ impl LowerSolvedEv<'_> {
     })
   }
 
+  fn left_indices(&self) -> Vec<usize> {
+    let mut left = self
+      .goal_indices
+      .iter()
+      .enumerate()
+      .filter_map(|(goal_index, row_index)| match row_index {
+        RowIndex::Left(left_indx) => Some((*left_indx, goal_index)),
+        _ => None,
+      })
+      .collect::<Vec<_>>();
+    left.sort_by_key(|(key, _)| *key);
+    left.into_iter().map(|(_, goal_index)| goal_index).collect()
+  }
+
+  fn right_indices(&self) -> Vec<usize> {
+    let mut right = self
+      .goal_indices
+      .iter()
+      .enumerate()
+      .filter_map(|(goal_index, row_index)| match row_index {
+        RowIndex::Right(right_index) => Some((*right_index, goal_index)),
+        _ => None,
+      })
+      .collect::<Vec<_>>();
+    right.sort_by_key(|(key, _)| *key);
+    right
+      .into_iter()
+      .map(|(_, goal_index)| goal_index)
+      .collect()
+  }
+
   fn left_enumerated_values(&self) -> impl Iterator<Item = (usize, Type)> {
-    self.left_indices.clone().into_iter().zip(self.left.clone())
+    self.left_indices().into_iter().zip(self.left.clone())
   }
 
   fn right_enumerated_values(&self) -> impl Iterator<Item = (usize, Type)> {
-    self
-      .right_indices
-      .clone()
-      .into_iter()
-      .zip(self.right.clone())
+    self.right_indices().into_iter().zip(self.right.clone())
   }
 
   fn concat(&mut self) -> IR {
-    // TODO: Calculate where these indices go in goal correctly. It's not enough to naively concat
-    // like we are here, we need to put them in the right slots.
     let vars = self.make_vars([self.left_prod(), self.right_prod()]);
     IR::funs(vars.clone(), {
       let [left, right] = vars;
@@ -668,15 +708,15 @@ impl LowerSolvedEv<'_> {
 
   fn prj_left(&mut self) -> IR {
     let [goal] = self.make_vars([self.goal_prod()]);
+    let left_indices = self.left_indices();
     IR::fun(goal.clone(), {
       if self.left.len() == 1 {
-        unwrap_prj(self.left_indices[0], self.goal.len(), goal)
+        unwrap_prj(left_indices[0], self.goal.len(), goal)
       } else {
         IR::tuple(
-          self
-            .left_indices
-            .iter()
-            .map(|i| unwrap_prj(*i, self.goal.len(), goal.clone())),
+          left_indices
+            .into_iter()
+            .map(|i| unwrap_prj(i, self.goal.len(), goal.clone())),
         )
       }
     })
@@ -684,15 +724,15 @@ impl LowerSolvedEv<'_> {
 
   fn prj_right(&mut self) -> IR {
     let [goal] = self.make_vars([self.goal_prod()]);
+    let right_indices = self.right_indices();
     IR::fun(goal.clone(), {
       if self.right.len() == 1 {
-        unwrap_prj(self.right_indices[0], self.goal.len(), goal)
+        unwrap_prj(right_indices[0], self.goal.len(), goal)
       } else {
         IR::tuple(
-          self
-            .right_indices
-            .iter()
-            .map(|i| unwrap_prj(*i, self.goal.len(), goal.clone())),
+          right_indices
+            .into_iter()
+            .map(|i| unwrap_prj(i, self.goal.len(), goal.clone())),
         )
       }
     })
@@ -780,25 +820,19 @@ impl LowerAst {
         };
         let param = self.supply.supply();
 
-        let mut left_indices = vec![0; left.fields.len()];
-        let mut right_indices = vec![0; right.fields.len()];
         let goal_indices = goal
           .fields
           .iter()
-          .enumerate()
-          .map(|(goal_indx, field)| {
+          .map(|field| {
             left
               .fields
               .binary_search(field)
-              .map(|left_indx| {
-                left_indices[left_indx] = goal_indx;
-                RowIndex::Left(left_indx)
-              })
+              .map(RowIndex::Left)
               .or_else(|_| {
-                right.fields.binary_search(field).map(|right_indx| {
-                  right_indices[right_indx] = goal_indx;
-                  RowIndex::Right(right_indx)
-                })
+                right
+                  .fields
+                  .binary_search(field)
+                  .map(RowIndex::Right)
               })
               .expect("ICE: Invalid solved row combination.")
           })
@@ -814,12 +848,15 @@ impl LowerAst {
           right: right_values,
           goal: goal_values,
           goal_indices,
-          left_indices,
-          right_indices,
         };
 
         let term = lower_solved_ev.lower_ev_term();
         let ty = self.types.lower_ev_ty(ev.clone());
+        debug_assert_eq!(
+          ty,
+          term.type_of(),
+          "Evidence term did not have the type expected by lower_ev_ty"
+        );
         let var = Var::new(param, ty);
         self.solved.push((var.clone(), term));
         var
@@ -900,25 +937,23 @@ impl LowerAst {
 }
 
 fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
-  let ev = scheme.evidence.clone();
-  let (ir_ty, kinds, lower_ty) = lower_ty_scheme(scheme);
-
+  let lowered_scheme = lower_ty_scheme(scheme);
   let mut supply = VarSupply::default();
-  let mut ev_to_var: HashMap<ast::Evidence, Var> = HashMap::default();
-  let params = ev
+  let mut params = vec![];
+  let ev_to_var = lowered_scheme
+    .ev_to_ty
     .into_iter()
-    .map(|ev| {
-      let ty = lower_ty.lower_ev_ty(ev.clone());
+    .map(|(ev, ty)| {
       let param = supply.supply();
       let var = Var::new(param, ty);
-      ev_to_var.insert(ev, var.clone());
-      var
+      params.push(var.clone());
+      (ev, var)
     })
-    .collect::<Vec<_>>();
+    .collect();
 
   let mut lower_ast = LowerAst {
     supply,
-    types: lower_ty,
+    types: lowered_scheme.lower_types,
     ev_to_var,
     solved: vec![],
   };
@@ -926,14 +961,15 @@ fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
   let solved_ir = lower_ast
     .solved
     .into_iter()
-    .fold(ir, |ir, (var, solved)| IR::app(IR::fun(var, ir), solved));
+    .fold(ir, |ir, (var, solved)| IR::local(var, solved, ir));
   let param_ir = params
     .into_iter()
     .rfold(solved_ir, |ir, var| IR::fun(var, ir));
-  let bound_ir = kinds
+  let bound_ir = lowered_scheme
+    .kinds
     .into_iter()
     .fold(param_ir, |ir, kind| IR::ty_fun(kind, ir));
-  (bound_ir, ir_ty)
+  (bound_ir, lowered_scheme.scheme)
 }
 
 fn pretty_string<'a>(
@@ -1130,59 +1166,58 @@ mod tests {
     // Haha, oh god. We can't get to inlining fast enough.
     let expect_ir = expect_test::expect![[r#"
         (ty_fun [Type]
-          ((fun [V32]
-            ((fun [V18]
-              ((fun [V0]
-                (V0[0] (V18[0] 1 2) (V32[0] (fun [V46] V46) 3)))
-                { (fun [V1, V2]
-                  {V2[0], V1[0], V1[1], V2[1]})
-                , (ty_fun [Type]
-                  (fun [V3, V4, V5]
-                    (case [V5] [
-                      V6 => (V4 <0: V6>)
-                      V7 => (V3 <0: V7>)
-                      V8 => (V3 <1: V8>)
-                      V9 => (V4 <1: V9>)
-                      ])))
-                , { (fun [V10]
-                    {V10[1], V10[2]})
-                  , (fun [V11]
-                    (case [V11] [
-                      V12 => <1: V12>
-                      V13 => <2: V13>
-                      ]))
-                  }
-                , { (fun [V14]
-                    {V14[0], V14[3]})
-                  , (fun [V15]
-                    (case [V15] [
-                      V16 => <0: V16>
-                      V17 => <3: V17>
-                      ]))
-                  }
-                }))
-              { (fun [V19, V20]
-                {V19, V20})
-              , (ty_fun [Type]
-                (fun [V21, V22, V23]
-                  (case [V23] [
-                    V24 => (V21 V24)
-                    V25 => (V22 V25)
-                    ])))
-              , {(fun [V26] V26[0]), (fun [V27] ((fun [V28] <0: V28>) V27))}
-              , {(fun [V29] V29[1]), (fun [V30] ((fun [V31] <1: V31>) V30))}
-              }))
-            { (fun [V33, V34]
-              {V33, V34})
-            , (ty_fun [Type]
-              (fun [V35, V36, V37]
-                (case [V37] [
-                  V38 => (V35 V38)
-                  V39 => (V36 V39)
-                  ])))
-            , {(fun [V40] V40[0]), (fun [V41] ((fun [V42] <0: V42>) V41))}
-            , {(fun [V43] V43[1]), (fun [V44] ((fun [V45] <1: V45>) V44))}
-            }))"#]];
+          (let
+            [ (V32 { (fun [V33, V34]
+                     {V33, V34})
+                   , (ty_fun [Type]
+                     (fun [V35, V36, V37]
+                       (case [V37] [
+                         V38 => (V35 V38)
+                         V39 => (V36 V39)
+                         ])))
+                   , {(fun [V40] V40[0]), (fun [V41] ((fun [V42] <0: V42>) V41))}
+                   , {(fun [V43] V43[1]), (fun [V44] ((fun [V45] <1: V45>) V44))}
+                   })
+            , (V18 { (fun [V19, V20]
+                     {V19, V20})
+                   , (ty_fun [Type]
+                     (fun [V21, V22, V23]
+                       (case [V23] [
+                         V24 => (V21 V24)
+                         V25 => (V22 V25)
+                         ])))
+                   , {(fun [V26] V26[0]), (fun [V27] ((fun [V28] <0: V28>) V27))}
+                   , {(fun [V29] V29[1]), (fun [V30] ((fun [V31] <1: V31>) V30))}
+                   })
+            , (V0 { (fun [V1, V2]
+                    {V2[0], V1[0], V1[1], V2[1]})
+                  , (ty_fun [Type]
+                    (fun [V3, V4, V5]
+                      (case [V5] [
+                        V6 => (V4 <0: V6>)
+                        V7 => (V3 <0: V7>)
+                        V8 => (V3 <1: V8>)
+                        V9 => (V4 <1: V9>)
+                        ])))
+                  , { (fun [V10]
+                      {V10[1], V10[2]})
+                    , (fun [V11]
+                      (case [V11] [
+                        V12 => <1: V12>
+                        V13 => <2: V13>
+                        ]))
+                    }
+                  , { (fun [V14]
+                      {V14[0], V14[3]})
+                    , (fun [V15]
+                      (case [V15] [
+                        V16 => <0: V16>
+                        V17 => <3: V17>
+                        ]))
+                    }
+                  })
+            ]
+            (V0[0] (V18[0] 1 2) (V32[0] (fun [V46] V46) 3))))"#]];
     expect_ir.assert_eq(&pretty_string(ir, 80));
 
     // How can so much IR make such small type.
@@ -1214,66 +1249,65 @@ mod tests {
 
     let expect_ir = expect_test::expect![[r#"
         (ty_fun [Type]
-          ((fun [V34]
-            ((fun [V18]
-              ((fun [V0]
-                ((ty_app [V0[1]] Ty(T0))
-                  ((ty_app [V18[1]] Ty(T0))
-                    (fun [V32]
-                      V32) (fun [V33]
-                      V33)) ((ty_app [V34[1]] Ty(T0))
-                    (fun [V48]
-                      (V48 1)) (fun [V49]
-                      V49))))
-                { (fun [V1, V2]
-                  {V2[0], V1[0], V1[1], V2[1]})
-                , (ty_fun [Type]
-                  (fun [V3, V4, V5]
-                    (case [V5] [
-                      V6 => (V4 <0: V6>)
-                      V7 => (V3 <0: V7>)
-                      V8 => (V3 <1: V8>)
-                      V9 => (V4 <1: V9>)
-                      ])))
-                , { (fun [V10]
-                    {V10[1], V10[2]})
-                  , (fun [V11]
-                    (case [V11] [
-                      V12 => <1: V12>
-                      V13 => <2: V13>
-                      ]))
-                  }
-                , { (fun [V14]
-                    {V14[0], V14[3]})
-                  , (fun [V15]
-                    (case [V15] [
-                      V16 => <0: V16>
-                      V17 => <3: V17>
-                      ]))
-                  }
-                }))
-              { (fun [V19, V20]
-                {V19, V20})
-              , (ty_fun [Type]
-                (fun [V21, V22, V23]
-                  (case [V23] [
-                    V24 => (V21 V24)
-                    V25 => (V22 V25)
-                    ])))
-              , {(fun [V26] V26[0]), (fun [V27] ((fun [V28] <0: V28>) V27))}
-              , {(fun [V29] V29[1]), (fun [V30] ((fun [V31] <1: V31>) V30))}
-              }))
-            { (fun [V35, V36]
-              {V35, V36})
-            , (ty_fun [Type]
-              (fun [V37, V38, V39]
-                (case [V39] [
-                  V40 => (V37 V40)
-                  V41 => (V38 V41)
-                  ])))
-            , {(fun [V42] V42[0]), (fun [V43] ((fun [V44] <0: V44>) V43))}
-            , {(fun [V45] V45[1]), (fun [V46] ((fun [V47] <1: V47>) V46))}
-            }))"#]];
+          (let
+            [ (V34 { (fun [V35, V36]
+                     {V35, V36})
+                   , (ty_fun [Type]
+                     (fun [V37, V38, V39]
+                       (case [V39] [
+                         V40 => (V37 V40)
+                         V41 => (V38 V41)
+                         ])))
+                   , {(fun [V42] V42[0]), (fun [V43] ((fun [V44] <0: V44>) V43))}
+                   , {(fun [V45] V45[1]), (fun [V46] ((fun [V47] <1: V47>) V46))}
+                   })
+            , (V18 { (fun [V19, V20]
+                     {V19, V20})
+                   , (ty_fun [Type]
+                     (fun [V21, V22, V23]
+                       (case [V23] [
+                         V24 => (V21 V24)
+                         V25 => (V22 V25)
+                         ])))
+                   , {(fun [V26] V26[0]), (fun [V27] ((fun [V28] <0: V28>) V27))}
+                   , {(fun [V29] V29[1]), (fun [V30] ((fun [V31] <1: V31>) V30))}
+                   })
+            , (V0 { (fun [V1, V2]
+                    {V2[0], V1[0], V1[1], V2[1]})
+                  , (ty_fun [Type]
+                    (fun [V3, V4, V5]
+                      (case [V5] [
+                        V6 => (V4 <0: V6>)
+                        V7 => (V3 <0: V7>)
+                        V8 => (V3 <1: V8>)
+                        V9 => (V4 <1: V9>)
+                        ])))
+                  , { (fun [V10]
+                      {V10[1], V10[2]})
+                    , (fun [V11]
+                      (case [V11] [
+                        V12 => <1: V12>
+                        V13 => <2: V13>
+                        ]))
+                    }
+                  , { (fun [V14]
+                      {V14[0], V14[3]})
+                    , (fun [V15]
+                      (case [V15] [
+                        V16 => <0: V16>
+                        V17 => <3: V17>
+                        ]))
+                    }
+                  })
+            ]
+            ((ty_app [V0[1]] Ty(T0))
+              ((ty_app [V18[1]] Ty(T0))
+                (fun [V32]
+                  V32) (fun [V33]
+                  V33)) ((ty_app [V34[1]] Ty(T0))
+                (fun [V48]
+                  (V48 1)) (fun [V49]
+                  V49)))))"#]];
     expect_ir.assert_eq(&pretty_string(ir, 80));
 
     let expect_ty = expect_test::expect![[r#"

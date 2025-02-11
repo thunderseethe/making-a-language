@@ -70,30 +70,29 @@ where
 
 impl<'a, D> Pretty<'a, D> for Row
 where
-    D: DocAllocator<'a>,
-    DocBuilder<'a, D>: Clone + 'a,
+  D: DocAllocator<'a>,
+  DocBuilder<'a, D>: Clone + 'a,
 {
-    fn pretty(self, a: &'a D) -> DocBuilder<'a, D, ()> {
-        match self {
-            Row::Open(var) => var.pretty(a),
-            Row::Closed(tys) => {
-          let single = a
-            .intersperse(
-              tys.clone().into_iter().map(|ty| ty.pretty(a)),
-              a.text(",").append(a.space()),
-            );
-          let multi = a
-            .space()
-            .append(a.intersperse(
-              tys.into_iter().map(|ty| ty.pretty(a)),
-              a.hardline().append(a.text(", ")),
-            ))
-            .append(a.hardline())
-            .align();
-          multi.flat_alt(single).group()
-            }
-        }
+  fn pretty(self, a: &'a D) -> DocBuilder<'a, D, ()> {
+    match self {
+      Row::Open(var) => var.pretty(a),
+      Row::Closed(tys) => {
+        let single = a.intersperse(
+          tys.clone().into_iter().map(|ty| ty.pretty(a)),
+          a.text(",").append(a.space()),
+        );
+        let multi = a
+          .space()
+          .append(a.intersperse(
+            tys.into_iter().map(|ty| ty.pretty(a)),
+            a.hardline().append(a.text(", ")),
+          ))
+          .append(a.hardline())
+          .align();
+        multi.flat_alt(single).group()
+      }
     }
+  }
 }
 
 impl<'a, D> Pretty<'a, D> for Type
@@ -184,6 +183,15 @@ impl IR {
       self
     }
   }
+
+  fn collect_locals(self, locals: &mut Vec<(Var, Box<Self>)>) -> Self {
+    if let IR::Local(var, defn, body) = self {
+      locals.push((var, defn));
+      body.collect_locals(locals)
+    } else {
+      self
+    }
+  }
 }
 
 impl<'a, D> Pretty<'a, D> for IR
@@ -240,11 +248,46 @@ where
         let mut tys = vec![ty];
         let ir = ty_fun.collect_tyapp_tys(&mut tys);
         a.text("ty_app")
-         .append(a.space())
-         .append(ir.pretty(a).brackets())
-         .append(a.line().append(a.intersperse(tys, a.space())).nest(2))
-         .parens()
-         .group()
+          .append(a.space())
+          .append(ir.pretty(a).brackets())
+          .append(a.line().append(a.intersperse(tys, a.space())).nest(2))
+          .parens()
+          .group()
+      }
+      IR::Local(var, defn, body) => {
+        let mut locals = vec![(var, defn)];
+        let body = body.collect_locals(&mut locals);
+
+        let pretty_local = |(var, defn): (Var, Box<IR>)| {
+          var
+            .pretty(a)
+            .append(a.space())
+            .append(defn.pretty(a))
+            .parens()
+        };
+        let single = a
+          .intersperse(
+            locals.clone().into_iter().map(pretty_local),
+            a.text(",").append(a.space()),
+          )
+          .brackets()
+          .group();
+        let multi = a.hardline().append(
+          a.space()
+            .append(a.intersperse(
+              locals.into_iter().map(pretty_local),
+              a.hardline().append(a.text(",")).append(a.space()),
+            ))
+            .append(a.hardline())
+            .brackets()
+            .align(),
+        ).nest(2);
+
+        a.text("let")
+          .append(multi.flat_alt(single))
+          .append(a.line().append(body.pretty(a)).nest(2))
+          .parens()
+          .group()
       }
       IR::Tuple(elems) => {
         let single = a
