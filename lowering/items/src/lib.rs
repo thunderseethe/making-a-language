@@ -17,7 +17,6 @@ pub struct Var {
   ty: Type,
 }
 
-
 impl Var {
   fn new(id: VarId, ty: Type) -> Self {
     Self { id, ty }
@@ -926,7 +925,6 @@ impl LowerAst {
       }
       Ast::Item(wrapper, item_id) => {
         let ty = self.item_source.lookup_item(item_id);
-        println!("{}\n{:?}", pretty_string(ty.clone(), 80), wrapper);
         let item_ir = IR::Item(ty, self.item_supply.supply_for(item_id));
         let wrapper = wrapper.expect("ICE: Item lacks expected wrapper");
         let ty_ir = wrapper.types.into_iter().fold(item_ir, |ir, ty| {
@@ -935,12 +933,10 @@ impl LowerAst {
         let row_ir = wrapper.rows.into_iter().fold(ty_ir, |ir, row| {
           IR::ty_app(ir, TyApp::Row(self.types.lower_row_ty(row)))
         });
-        let ir = wrapper.evidence.into_iter().fold(row_ir, |ir, ev| {
+        wrapper.evidence.into_iter().fold(row_ir, |ir, ev| {
           let param = self.lookup_ev(ev);
           IR::app(ir, IR::Var(param))
-        });
-        println!("{}", pretty_string(ir.clone(), 80));
-        ir
+        })
       }
     }
   }
@@ -1001,6 +997,7 @@ fn lower_with_items(
     item_source: lower_item_source(item_source),
     item_supply: ItemSupply::default(),
   };
+
   let ir = lower_ast.lower_ast(ast);
   let solved_ir = lower_ast
     .solved

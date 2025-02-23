@@ -6,12 +6,12 @@ use types_rows::{self as ast, Ast, Evidence, TypedVar};
 mod pretty;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-struct VarId(u32);
+pub struct VarId(u32);
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct Var {
-  id: VarId,
-  ty: Type,
+  pub id: VarId,
+  pub ty: Type,
 }
 
 impl Var {
