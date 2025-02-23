@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::ast::{Ast, TypedVar};
+use crate::ast::{Ast, BranchMeta, ItemWrapper, TypedVar};
 use crate::ty::{ClosedRow, Row, RowCombination, RowUniVar, RowVar, Type, TypeUniVar, TypeVar};
 use crate::{Evidence, TypeInference};
 
@@ -91,21 +91,22 @@ impl TypeInference {
   }
 
   fn tyvar_for_unifier(&mut self, var: TypeUniVar) -> TypeVar {
-      *self.subst_unifiers_to_tyvars.entry(var)
-          .or_insert_with(|| {
-              let next = self.next_tyvar;
-              self.next_tyvar += 1;
-              TypeVar(next)
-          })
+    *self.subst_unifiers_to_tyvars.entry(var).or_insert_with(|| {
+      let next = self.next_tyvar;
+      self.next_tyvar += 1;
+      TypeVar(next)
+    })
   }
 
   fn rowvar_for_unifier(&mut self, var: RowUniVar) -> RowVar {
-      *self.subst_unifiers_to_rowvars.entry(var)
-          .or_insert_with(|| {
-              let next = self.next_rowvar;
-              self.next_rowvar += 1;
-              RowVar(next)
-          })
+    *self
+      .subst_unifiers_to_rowvars
+      .entry(var)
+      .or_insert_with(|| {
+        let next = self.next_rowvar;
+        self.next_rowvar += 1;
+        RowVar(next)
+      })
   }
 
   pub(crate) fn substitute_ty(&mut self, ty: Type) -> SubstOut<Type> {
@@ -117,9 +118,9 @@ impl TypeInference {
         match self.unification_table.probe_value(root) {
           Some(ty) => self.substitute_ty(ty),
           None => {
-              let tyvar = self.tyvar_for_unifier(root);
-              SubstOut::new(Type::Var(tyvar)).with_unbound_ty(tyvar)
-          },
+            let tyvar = self.tyvar_for_unifier(root);
+            SubstOut::new(Type::Var(tyvar)).with_unbound_ty(tyvar)
+          }
         }
       }
       Type::Fun(arg, ret) => {
@@ -152,16 +153,103 @@ impl TypeInference {
         .substitute_ast(*ast)
         .map(|ast| Ast::unlabel(ast, label)),
       // Products constructor and destructor
-      Ast::Concat(left, right) => self
-        .substitute_ast(*left)
-        .merge(self.substitute_ast(*right), Ast::concat),
-      Ast::Project(dir, ast) => self.substitute_ast(*ast).map(|ast| Ast::project(dir, ast)),
+      Ast::Concat(meta, left, right) => self
+        .substitute_evidence(meta.expect("Type checking should've set concat meta"))
+        .merge(self.substitute_ast(*left), |m, l| (m, l))
+        .merge(self.substitute_ast(*right), |(meta, left), right| {
+          Ast::concat(meta, left, right)
+        }),
+      Ast::Project(meta, dir, ast) => self
+        .substitute_evidence(meta.expect("Type checking should've set project meta"))
+        .merge(self.substitute_ast(*ast), |meta, ast| {
+          Ast::project(meta, dir, ast)
+        }),
       // Sums constructor and destructor
-      Ast::Branch(left, right) => self
-        .substitute_ast(*left)
-        .merge(self.substitute_ast(*right), Ast::branch),
-      Ast::Inject(dir, ast) => self.substitute_ast(*ast).map(|ast| Ast::inject(dir, ast)),
-      Ast::Item(item_id) => SubstOut::new(Ast::Item(item_id)),
+      Ast::Branch(meta, left, right) => self
+        .substitute_branch_meta(meta.expect("Type checking should've set branch meta"))
+        .merge(self.substitute_ast(*left), |m, l| (m, l))
+        .merge(self.substitute_ast(*right), |(meta, left), right| {
+          Ast::branch(meta, left, right)
+        }),
+      Ast::Inject(meta, dir, ast) => self
+        .substitute_evidence(meta.expect("Type checking should've set inject meta"))
+        .merge(self.substitute_ast(*ast), |meta, ast| {
+          Ast::inject(meta, dir, ast)
+        }),
+      Ast::Item(wrapper, item_id) => self
+        .substitute_wrapper(wrapper)
+        .map(|wrapper| Ast::Item(wrapper, item_id)),
+    }
+  }
+
+  pub(crate) fn substitute_wrapper(
+    &mut self,
+    wrapper: Option<ItemWrapper>,
+  ) -> SubstOut<Option<ItemWrapper>> {
+    let Some(wrapper) = wrapper else {
+      return SubstOut::new(None);
+    };
+    fn transpose<T>(vec: Vec<SubstOut<T>>) -> SubstOut<Vec<T>> {
+      let mut subst = SubstOut::new(vec![]);
+      for ele in vec {
+        subst.unbound_tys.extend(ele.unbound_tys);
+        subst.unbound_rows.extend(ele.unbound_rows);
+        subst.value.push(ele.value);
+      }
+      subst
+    }
+
+    transpose(
+      wrapper
+        .types
+        .into_iter()
+        .map(|ty| self.substitute_ty(ty))
+        .collect(),
+    )
+    .merge(
+      transpose(
+        wrapper
+          .rows
+          .into_iter()
+          .map(|row| self.substitute_row(row))
+          .collect(),
+      ),
+      |t, r| (t, r),
+    )
+    .merge(
+      transpose(
+        wrapper
+          .evidence
+          .into_iter()
+          .map(|ev| self.substitute_evidence(ev))
+          .collect(),
+      ),
+      |(types, rows), evidence| {
+        Some(ItemWrapper {
+          types,
+          rows,
+          evidence,
+        })
+      },
+    )
+  }
+
+  pub(crate) fn substitute_branch_meta(&mut self, meta: BranchMeta) -> SubstOut<BranchMeta> {
+    self
+      .substitute_ty(meta.ty)
+      .merge(self.substitute_evidence(meta.evidence), |ty, evidence| {
+        BranchMeta { ty, evidence }
+      })
+  }
+
+  pub(crate) fn substitute_evidence(&mut self, ev: Evidence) -> SubstOut<Evidence> {
+    match ev {
+      Evidence::RowEquation { left, right, goal } => self
+        .substitute_row(left)
+        .merge(self.substitute_row(right), |l, r| (l, r))
+        .merge(self.substitute_row(goal), |(left, right), goal| {
+          Evidence::RowEquation { left, right, goal }
+        }),
     }
   }
 
