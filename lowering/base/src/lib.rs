@@ -71,6 +71,7 @@ enum IR {
   App(Box<Self>, Box<Self>),
   TyFun(Kind, Box<Self>),
   TyApp(Box<Self>, Type),
+  Local(Var, Box<Self>, Box<Self>),
 }
 
 impl IR {
@@ -107,6 +108,12 @@ impl IR {
         };
 
         ret_ty.subst(ty.clone())
+      }
+      IR::Local(v, defn, body) => {
+        if v.ty != defn.type_of() {
+          panic!("ICE: Type mismatch local variable has different type from it's definition.")
+        }
+        body.type_of()
       }
     }
   }
