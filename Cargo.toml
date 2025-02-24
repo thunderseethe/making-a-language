@@ -19,6 +19,8 @@ lowering-rows = { path = "lowering/rows" }
 ena = "0.14.2"
 im = "15.1"
 pretty_assertions = "1.4"
+expect-test = "1.5.1"
+pretty = "0.12.3"
 
 [package]
 name = "type-inference"
