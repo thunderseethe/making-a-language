@@ -3,10 +3,10 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use ena::unify::InPlaceUnificationTable;
 
-pub use self::ast::{Ast, ItemId, TypedVar, Var, Direction};
+pub use self::ast::{Ast, Direction, ItemId, TypedVar, Var};
 use self::subst::SubstOut;
-pub use self::ty::{Row, RowCombination, RowVar, Type, TypeVar, ClosedRow};
-use self::ty::{TypeUniVar, RowUniVar};
+pub use self::ty::{ClosedRow, Row, RowCombination, RowVar, Type, TypeVar};
+use self::ty::{RowUniVar, TypeUniVar};
 use self::unification::TypeError;
 
 mod ast;
@@ -158,6 +158,18 @@ fn type_check_with_items(
 ) -> Result<Ast<TypedVar>, TypeError> {
   let mut ctx = TypeInference {
     item_source,
+    next_tyvar: signature
+      .unbound_tys
+      .iter()
+      .max()
+      .map(|tv| tv.0 + 1)
+      .unwrap_or(0),
+    next_rowvar: signature
+      .unbound_rows
+      .iter()
+      .max()
+      .map(|rv| rv.0 + 1)
+      .unwrap_or(0),
     ..Default::default()
   };
 
@@ -352,12 +364,12 @@ mod tests {
 
     let m = RowVar(0);
     let n = RowVar(1);
-    let goal = RowVar(2);
+    let goal = RowVar(3);
     let a = TypeVar(0);
     assert_eq!(
       ty_chk.1,
       TypeScheme {
-        unbound_rows: set![n, RowVar(3), m, goal],
+        unbound_rows: set![n, RowVar(2), m, goal],
         unbound_tys: set![a],
         evidence: vec![
           Evidence::RowEquation {
@@ -367,7 +379,7 @@ mod tests {
           },
           Evidence::RowEquation {
             left: Row::Closed(single_row("x", Type::Var(a))),
-            right: Row::Open(RowVar(3)),
+            right: Row::Open(RowVar(2)),
             goal: Row::Open(goal)
           }
         ],
@@ -402,16 +414,16 @@ mod tests {
 
     let f = RowVar(0);
     let g = RowVar(1);
-    let goal = RowVar(3);
+    let goal = RowVar(2);
     let a = TypeVar(1);
     let r = TypeVar(0);
     assert_eq!(
       TypeScheme {
-        unbound_rows: set![g, f, RowVar(2), goal],
+        unbound_rows: set![g, f, RowVar(3), goal],
         unbound_tys: set![a, r],
         evidence: vec![
           Evidence::RowEquation {
-            left: Row::Open(RowVar(2)),
+            left: Row::Open(RowVar(3)),
             right: Row::Closed(single_row("Con", Type::Var(a))),
             goal: Row::Open(goal)
           },
@@ -463,8 +475,8 @@ mod tests {
           goal: Row::Open(w),
         },
         Evidence::RowEquation {
-          left: Row::Open(RowVar(3)),
-          right: Row::single("x", Type::Var(a)),
+          left: Row::single("x", Type::Var(a)),
+          right: Row::Open(RowVar(3)),
           goal: Row::Open(w),
         },
       ],

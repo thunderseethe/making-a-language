@@ -63,7 +63,7 @@ impl Type {
   }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum IR {
   Var(Var),
   Int(isize),

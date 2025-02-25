@@ -121,7 +121,7 @@ impl TypeInference {
       (Type::Int, Type::Int) => Ok(()),
       (Type::Var(a), Type::Var(b)) => (a == b)
         .then_some(())
-        .ok_or_else(|| TypeError::TypeNotEqual((Type::Var(a), Type::Var(b)))),
+        .ok_or(TypeError::TypeNotEqual((Type::Var(a), Type::Var(b)))),
       (Type::Fun(a_arg, a_ret), Type::Fun(b_arg, b_ret)) => {
         self.unify_ty_ty(*a_arg, *b_arg)?;
         self.unify_ty_ty(*a_ret, *b_ret)
@@ -183,7 +183,7 @@ impl TypeInference {
     match (left, right) {
       (Row::Open(left), Row::Open(right)) => (left == right)
         .then_some(())
-        .ok_or_else(|| TypeError::RowsNotEqual((Row::Open(left), Row::Open(right)))),
+        .ok_or(TypeError::RowsNotEqual((Row::Open(left), Row::Open(right)))),
       (Row::Unifier(left), Row::Unifier(right)) => self
         .row_unification_table
         .unify_var_var(left, right)
@@ -238,21 +238,26 @@ impl TypeInference {
       (left, right, goal) => {
         let new_comb = RowCombination { left, right, goal };
         // Check if we've already seen an combination that we can unify against
-        let poss_uni = self.partial_row_combs.iter().find_map(|comb| {
+        let mut poss_uni = None;
+        self.partial_row_combs = std::mem::take(&mut self.partial_row_combs).into_iter().map(|comb| {
+          let comb = RowCombination {
+            left: self.normalize_row(comb.left),
+            right: self.normalize_row(comb.right),
+            goal: self.normalize_row(comb.goal),
+          };
           if comb.is_unifiable(&new_comb) {
-            Some(comb.clone())
+            poss_uni = Some(comb.clone());
           //Row combinations commute so we have to check for that possible unification
           } else if comb.is_comm_unifiable(&new_comb) {
             // We commute our combination so we unify the correct rows later
-            Some(RowCombination {
+            poss_uni = Some(RowCombination {
               left: comb.right.clone(),
               right: comb.left.clone(),
               goal: comb.goal.clone(),
-            })
-          } else {
-            None
+            });
           }
-        });
+          comb
+        }).collect();
 
         match poss_uni {
           // Unify if we have a match
