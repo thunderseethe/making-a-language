@@ -13,3 +13,4 @@ The stages in the compiler:
 * [lowering](/lowering) - Lowering into our intermediate representation (IR)
   * [base](/lowering/base) - Lowering the AST of our base type checker.
   * [rows](/lowering/rows) - Lowering our rows type checker using evidence passing.
+  * [items](/lowering/items) - Lowering top level items into our IR.
