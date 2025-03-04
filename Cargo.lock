@@ -78,6 +78,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "lowering-items"
+version = "0.1.0"
+dependencies = [
+ "expect-test",
+ "pretty",
+ "types-items",
+]
+
+[[package]]
 name = "lowering-rows"
 version = "0.1.0"
 dependencies = [

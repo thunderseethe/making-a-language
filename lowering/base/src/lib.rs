@@ -36,6 +36,78 @@ enum Type {
   TyFun(Kind, Box<Self>),
 }
 
+impl TypeVar {
+  fn adjust(&mut self, cutoff: usize) {
+    if self.0 >= cutoff {
+      self.0 += 1;
+    }
+  }
+}
+
+impl Type {
+  fn adjust(&mut self, cutoff: usize) {
+    match self {
+      Type::Int => {}
+      Type::Var(type_var) => type_var.adjust(cutoff),
+      Type::Fun(arg, ret) => {
+        arg.adjust(cutoff);
+        ret.adjust(cutoff);
+      }
+      Type::TyFun(_, body) => {
+        body.adjust(cutoff + 1);
+      }
+    }
+  }
+
+  fn shift(&mut self) {
+    self.adjust(0);
+  }
+
+  fn shifted(mut self) -> Self {
+    self.shift();
+    self
+  }
+}
+
+#[derive(Clone)]
+enum Subst {
+    TyPayload(Type)
+}
+impl Subst {
+  fn shift(&mut self) {
+    match self {
+      Subst::TyPayload(ty) => ty.shift(),
+    }
+  }
+
+  fn shifted(mut self) -> Self {
+    self.shift();
+    self
+  }
+
+  fn subst_ty_var(self) -> Type {
+    match self {
+      Subst::TyPayload(ty) => ty,
+    }
+  }
+
+  fn subst_ty(self, haystack: Type, needle: usize) -> Type {
+    match haystack {
+      Type::Int => Type::Int,
+      Type::Var(type_var) => match type_var.0.cmp(&needle) {
+        Ordering::Equal => self.subst_ty_var(),
+        Ordering::Less => Type::Var(type_var),
+        Ordering::Greater => Type::Var(TypeVar(type_var.0 - 1)),
+      },
+      Type::Fun(arg, ret) => Type::fun(
+        self.clone().subst_ty(*arg, needle),
+        self.subst_ty(*ret, needle),
+      ),
+      Type::TyFun(kind, body) => Type::ty_fun(kind, self.shifted().subst_ty(*body, needle + 1)),
+    }
+  }
+}
+
 impl Type {
   fn fun(arg: Self, ret: Self) -> Self {
     Self::Fun(Box::new(arg), Box::new(ret))
@@ -45,21 +117,8 @@ impl Type {
     Self::TyFun(kind, Box::new(body))
   }
 
-  fn subst_internal(self, ty: Self, needle: usize) -> Self {
-    match self {
-      Type::Int => Type::Int,
-      Type::Var(type_var) => match type_var.0.cmp(&needle) {
-        Ordering::Equal => ty,
-        Ordering::Less => Type::Var(type_var),
-        Ordering::Greater => Type::Var(TypeVar(type_var.0 - 1)),
-      },
-      Type::Fun(arg, ret) => Type::fun(arg.subst(ty.clone()), ret.subst(ty)),
-      Type::TyFun(kind, body) => Type::ty_fun(kind, body.subst_internal(ty, needle + 1)),
-    }
-  }
-
-  fn subst(self, ty: Self) -> Self {
-    self.subst_internal(ty, 0)
+  fn subst_ty(self, ty: Self) -> Self {
+    Subst::TyPayload(ty).subst_ty(self, 0)
   }
 }
 
@@ -107,7 +166,7 @@ impl IR {
           panic!("ICE: Type applied to a non-forall IR term");
         };
 
-        ret_ty.subst(ty.clone())
+        ret_ty.subst_ty(ty.clone())
       }
       IR::Local(v, defn, body) => {
         if v.ty != defn.type_of() {
