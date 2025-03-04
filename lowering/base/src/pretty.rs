@@ -235,35 +235,39 @@ where
             .append(defn.pretty(a))
             .parens()
         };
-        let single = a
-          .intersperse(
+        let single = a.space().append(
+          a.intersperse(
             locals.clone().into_iter().map(pretty_local),
             a.text(",").append(a.space()),
           )
           .brackets()
-          .group();
-        let multi = a.hardline().append(
-          a.space()
-            .append(a.intersperse(
-              locals.into_iter().map(pretty_local),
-              a.hardline().append(a.text(",")).append(a.space()),
-            ))
-            .append(a.hardline())
-            .brackets()
-            .align(),
-        ).nest(2);
+          .group(),
+        );
+        let multi = a
+          .hardline()
+          .append(
+            a.space()
+              .append(a.intersperse(
+                locals.into_iter().map(pretty_local),
+                a.hardline().append(a.text(",")).append(a.space()),
+              ))
+              .append(a.hardline())
+              .brackets()
+              .align(),
+          )
+          .nest(2);
 
         a.text("let")
           .append(multi.flat_alt(single))
           .append(a.line().append(body.pretty(a)).nest(2))
           .parens()
           .group()
-      },
+      }
     }
   }
 }
 
-pub(crate) fn pretty_string<'a>(pretty: impl Pretty<'a, RcAllocator>, width: usize) -> String {
+pub fn pretty_string<'a>(pretty: impl Pretty<'a, RcAllocator>, width: usize) -> String {
   let mut s = String::new();
   pretty
     .pretty(&RcAllocator)

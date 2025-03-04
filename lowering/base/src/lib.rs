@@ -3,15 +3,15 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use types_base::{self as ast, Ast, TypedVar};
 
-mod pretty;
+pub mod pretty;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-struct VarId(usize);
+pub struct VarId(usize);
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub struct Var {
-  id: VarId,
-  ty: Type,
+  pub id: VarId,
+  pub ty: Type,
 }
 
 impl Var {
@@ -157,6 +157,10 @@ impl IR {
     Self::TyApp(Box::new(ty_fun), ty)
   }
 
+  pub fn local(var: Var, defn: Self, body: Self) -> Self {
+    Self::Local(var, Box::new(defn), Box::new(body))
+  }
+
   fn type_of(&self) -> Type {
     match self {
       IR::Var(v) => v.ty.clone(),
@@ -272,7 +276,7 @@ impl LowerAst {
   }
 }
 
-fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
+pub fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
   let (ir_ty, types) = lower_ty_scheme(scheme);
   let mut lower_ast = LowerAst {
     supply: VarSupply::default(),
