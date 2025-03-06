@@ -1,19 +1,18 @@
-use std::collections::HashMap;
+use std::collections::HashSet;
 
-use lowering_base::pretty::pretty_string;
+use im::HashMap;
+
 use lowering_base::{Kind, Type, Var, VarId, IR};
 
 enum Param {
   Ty(Kind),
-  Val(Var),
+  Val,
 }
 
 trait IRExt {
   fn is_trivial(&self) -> bool;
 
   fn is_value(&self) -> bool;
-
-  fn within_toplevel_funs(self, body: impl FnOnce(&Vec<Param>, IR) -> IR) -> IR;
 
   fn split_funs(&self) -> (Vec<Param>, &IR);
 
@@ -34,28 +33,6 @@ impl IRExt for IR {
     }
   }
 
-  fn within_toplevel_funs(self, fun: impl FnOnce(&Vec<Param>, IR) -> IR) -> IR {
-    let mut params = vec![];
-    let mut cursor = self;
-    let body = loop {
-      match cursor {
-        IR::TyFun(kind, ir) => {
-          params.push(Param::Ty(kind));
-          cursor = *ir;
-        }
-        IR::Fun(var, ir) => {
-          params.push(Param::Val(var));
-          cursor = *ir;
-        }
-        ir => break ir,
-      }
-    };
-    let body = fun(&params, body);
-    params.into_iter().rfold(body, |body, param| match param {
-      Param::Ty(kind) => IR::ty_fun(kind, body),
-      Param::Val(var) => IR::fun(var, body),
-    })
-  }
   fn split_funs(&self) -> (Vec<Param>, &IR) {
     fn split_funs<'a>(ir: &'a IR, params: &mut Vec<Param>) -> &'a IR {
       match ir {
@@ -63,8 +40,8 @@ impl IRExt for IR {
           params.push(Param::Ty(*kind));
           split_funs(ir, params)
         }
-        IR::Fun(var, ir) => {
-          params.push(Param::Val(var.clone()));
+        IR::Fun(_, ir) => {
+          params.push(Param::Val);
           split_funs(ir, params)
         }
         ir => ir,
@@ -140,7 +117,7 @@ enum Occurrence {
   Many,
 }
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 struct Occurrences {
   vars: HashMap<VarId, Occurrence>,
 }
@@ -151,7 +128,7 @@ impl Occurrences {
     Self { vars }
   }
 
-  fn in_fun(self) -> Self {
+  fn in_fun(self, free: &HashSet<VarId>) -> Self {
     Self {
       vars: self
         .vars
@@ -160,7 +137,12 @@ impl Occurrences {
           (
             id,
             match occ {
-              Occurrence::Once => Occurrence::OnceInFun,
+              // Only mark the free variables of a function as OnceInFun.
+              // This prevents marking bindings fully encapsulated by the function as OnceInFun.
+              // In term:
+              // (fun [V0] (let [V1 3] V1))
+              // V1 should be considered Once not OnceInFun.
+              Occurrence::Once if free.contains(&id) => Occurrence::OnceInFun,
               occ => occ,
             },
           )
@@ -169,7 +151,8 @@ impl Occurrences {
     }
   }
 
-  fn merge_internal(&mut self, other: Self, once_meet: Occurrence) {
+  fn merge(mut self, other: Self) -> Self {
+    let once_meet = Occurrence::Many;
     for (var, occ) in other.vars {
       self
         .vars
@@ -184,56 +167,46 @@ impl Occurrences {
         })
         .or_insert(occ);
     }
-  }
-
-  fn merge_mut(&mut self, other: Self) {
-    self.merge_internal(other, Occurrence::Many);
-  }
-
-  fn merge(mut self, other: Self) -> Self {
-    self.merge_mut(other);
     self
   }
 
   fn lookup_var(&self, var: &Var) -> Occurrence {
     self.vars.get(&var.id).copied().unwrap_or(Occurrence::Dead)
   }
+
+  fn mark_dead(&mut self, id: &VarId) {
+    self.vars.remove(id);
+  }
 }
 
-fn occurrence_analysis(ir: IR) -> (IR, Occurrences) {
+fn occurrence_analysis(ir: &IR) -> (HashSet<VarId>, Occurrences) {
   match ir {
     IR::Var(var) => {
-      let occs = Occurrences::with_var_once(var.id);
-      (IR::Var(var), occs)
+      let mut free = HashSet::default();
+      free.insert(var.id);
+      (free, Occurrences::with_var_once(var.id))
     }
-    IR::Int(i) => (IR::Int(i), Occurrences::default()),
+    IR::Int(_) => (HashSet::default(), Occurrences::default()),
     IR::Fun(var, ir) => {
-      let (body, occs) = occurrence_analysis(*ir);
-      (IR::fun(var, body), occs.in_fun())
+      let (mut free, occs) = occurrence_analysis(ir);
+      free.remove(&var.id);
+      let occs = occs.in_fun(&free);
+      (free, occs)
     }
     IR::App(fun, arg) => {
-      let (fun, fun_occs) = occurrence_analysis(*fun);
-      let (arg, arg_occs) = occurrence_analysis(*arg);
-      (IR::app(fun, arg), fun_occs.merge(arg_occs))
+      let (mut fun_free, fun_occs) = occurrence_analysis(fun);
+      let (arg_free, arg_occs) = occurrence_analysis(arg);
+      fun_free.extend(arg_free);
+      (fun_free, fun_occs.merge(arg_occs))
     }
-    IR::TyFun(kind, ir) => {
-      let (body, occs) = occurrence_analysis(*ir);
-      (IR::ty_fun(kind, body), occs)
-    }
-    IR::TyApp(ir, ty_app) => {
-      let (ty_fun, occs) = occurrence_analysis(*ir);
-      (IR::ty_app(ty_fun, ty_app), occs)
-    }
+    IR::TyFun(_, ir) => occurrence_analysis(ir),
+    IR::TyApp(ir, _) => occurrence_analysis(ir),
     IR::Local(var, defn, body) => {
-      let (body, occs) = occurrence_analysis(*body);
-      // Immediately strip away a dead binding.
-      if let Occurrence::Dead = occs.lookup_var(&var) {
-        (body, occs)
-      } else {
-        // Only add occurrences if our binding isn't dead.
-        let (defn, defn_occs) = occurrence_analysis(*defn);
-        (IR::local(var, defn, body), defn_occs.merge(occs))
-      }
+      let (mut free, occs) = occurrence_analysis(body);
+      let (defn_free, defn_occs) = occurrence_analysis(defn);
+      free.extend(defn_free);
+      free.remove(&var.id);
+      (free, defn_occs.merge(occs))
     }
   }
 }
@@ -252,13 +225,12 @@ enum Definition {
 }
 type InScope = HashMap<VarId, Definition>;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Simplifier {
   // state to perform simplification
   occs: Occurrences,
   subst: Subst,
-  in_scope: InScope,
-  ctx: Context,
+  //ctx: Context,
 
   // stats, used to determine if we simplified
   saturated_fun_count: usize,
@@ -275,8 +247,6 @@ impl Default for Simplifier {
       inline_size_threshold: 60,
       occs: Default::default(),
       subst: Default::default(),
-      in_scope: Default::default(),
-      ctx: Default::default(),
       saturated_fun_count: Default::default(),
       saturated_ty_fun_count: Default::default(),
       locals_inlined: Default::default(),
@@ -284,165 +254,170 @@ impl Default for Simplifier {
   }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum ContextEntry {
-  AppContext(IR, Subst),
-  TyAppContext(Type, Subst),
+  App(IR),
+  TyApp(Type),
+  Local(Var, Occurrence, IR),
 }
 
-type Context = Vec<ContextEntry>;
+type Context = Vec<(ContextEntry, Subst)>;
 
 impl Simplifier {
-  fn new(in_scope: InScope, occs: Occurrences) -> Self {
+  fn new(occs: Occurrences) -> Self {
     Self {
-      in_scope,
       occs,
       ..Default::default()
     }
   }
 
-  fn some_benefit(&self, ir: &IR) -> bool {
+  fn some_benefit(&self, ir: &IR, ctx: &Context) -> bool {
     let (params, _) = ir.split_funs();
     // If we have a non trivial argument in context, there's some benefit.
-    if self.ctx.iter().take(params.len()).any(|entry| match entry {
-      ContextEntry::AppContext(arg, _) => !arg.is_trivial(),
-      _ => false,
-    }) {
+    if ctx
+      .iter()
+      .rev()
+      .take(params.len())
+      .any(|entry| match entry {
+        (ContextEntry::App(arg), _) => !arg.is_trivial(),
+        _ => false,
+      })
+    {
       return true;
     }
 
     // We have enough arguments to saturate our parameters.
     // We know this is a local function so there is benefit to inline
-    if self.ctx.len() > params.len() {
+    if ctx.len() > params.len() {
       return true;
     }
 
     // If we saturate all args to our function and then apply more args to the body there is value
     // in inlining.
-    matches!(
-      self.ctx.get(params.len()),
-      Some(ContextEntry::AppContext(_, _))
-    )
+    matches!(ctx.get(params.len()), Some((ContextEntry::App(_), _)))
   }
 
-  fn in_snapshot<T>(&mut self, cont: impl FnOnce(&mut Self) -> T) -> T {
-    let ctx = std::mem::take(&mut self.ctx);
-    let in_scope = self.in_scope.clone();
-    let result = cont(self);
-    self.ctx = ctx;
-    self.in_scope = in_scope;
-    result
-  }
-
-  fn rebuild(&mut self, mut ir: IR) -> IR {
-    while let Some(cont) = self.ctx.pop() {
-      match cont {
-        ContextEntry::AppContext(arg, env) => {
-          self.subst = env;
-          ir = if let IR::Fun(var, body) = ir {
-            self.saturated_fun_count += 1;
-            self.simplify(IR::local(var, arg, *body))
-          } else {
-            let arg = self.simplify(arg);
-            IR::app(ir, arg)
-          };
+  fn rebuild(&mut self, ir: IR, in_scope: InScope, mut ctx: Context) -> IR {
+    let Some((entry, subst)) = ctx.pop() else {
+      return ir;
+    };
+    self.subst = subst;
+    match entry {
+      ContextEntry::App(arg) => {
+        if let IR::Fun(var, body) = ir {
+          self.saturated_fun_count += 1;
+          let ir = IR::local(var, arg, *body);
+          self.simplify(ir, in_scope, ctx)
+        } else {
+          let arg = self.simplify(arg, in_scope.clone(), vec![]);
+          let app = IR::app(ir, arg);
+          self.rebuild(app, in_scope, ctx)
         }
-        ContextEntry::TyAppContext(ty, env) => {
-          self.subst = env;
-          ir = if let IR::TyFun(_, body) = ir {
-            self.saturated_ty_fun_count += 1;
-            subst_ty(*body, ty)
+      }
+      ContextEntry::TyApp(ty) => {
+        let ir = if let IR::TyFun(_, body) = ir {
+          self.saturated_ty_fun_count += 1;
+          subst_ty(*body, ty)
+        } else {
+          IR::ty_app(ir, ty)
+        };
+        self.rebuild(ir, in_scope, ctx)
+      }
+      ContextEntry::Local(var, occ, body) => {
+        if ir.is_trivial() {
+          self.locals_inlined += 1;
+          self.subst.insert(var.id, SubstRng::Done(ir));
+          self.simplify(body, in_scope, ctx)
+        } else {
+          let body = self.simplify(body, in_scope.update(var.id, Definition::BoundTo(ir.clone(), occ)), vec![]);
+          // We might have inlined all occurrences of var while simplifying body
+          if let Occurrence::Dead = self.occs.lookup_var(&var) {
+            self.rebuild(body, in_scope, ctx)
           } else {
-            IR::ty_app(ir, ty)
-          };
+            self.rebuild(IR::local(var, ir, body), in_scope, ctx)
+          }
         }
       }
     }
-    ir
   }
 
-  fn simplify(&mut self, ir: IR) -> IR {
+  fn simplify(&mut self, ir: IR, in_scope: InScope, mut ctx: Context) -> IR {
     match ir {
       IR::App(fun, arg) => {
-        self
-          .ctx
-          .push(ContextEntry::AppContext(*arg, self.subst.clone()));
-        self.simplify(*fun)
+        ctx.push((ContextEntry::App(*arg), self.subst.clone()));
+        self.simplify(*fun, in_scope, ctx)
       }
       IR::TyApp(ty_fun, ty_app) => {
-        self
-          .ctx
-          .push(ContextEntry::TyAppContext(ty_app, self.subst.clone()));
-        self.simplify(*ty_fun)
+        ctx.push((ContextEntry::TyApp(ty_app), self.subst.clone()));
+        self.simplify(*ty_fun, in_scope, ctx)
       }
       IR::TyFun(kind, body) => {
-        let body = self.in_snapshot(|this| this.simplify(*body));
-        self.rebuild(IR::ty_fun(kind, body))
+        let body = self.simplify(*body, in_scope.clone(), vec![]);
+        self.rebuild(IR::ty_fun(kind, body), in_scope, ctx)
       }
       IR::Fun(var, body) => {
-        let body = self.in_snapshot(|this| {
-          this.in_scope.insert(var.id, Definition::Unknown);
-          this.simplify(*body)
-        });
-        self.rebuild(IR::fun(var, body))
+        let body = self.simplify(*body, in_scope.update(var.id, Definition::Unknown), vec![]);
+        self.rebuild(IR::fun(var, body), in_scope, ctx)
       }
       IR::Local(var, defn, body) => {
         let occ = self.occs.lookup_var(&var);
-        println!("{:?}", self.occs);
-        if let Occurrence::Once = occ {
-          self.locals_inlined += 1;
-          let subst = self.subst.clone();
-          self.subst.insert(var.id, SubstRng::Suspend(*defn, subst));
-          self.simplify(*body)
-        } else {
-          let simple_defn = self.simplify(*defn);
-          if simple_defn.is_trivial() {
+        match occ {
+          // Throwaway dead bindings.
+          Occurrence::Dead => {
             self.locals_inlined += 1;
-            self.subst.insert(var.id, SubstRng::Done(simple_defn));
-            self.simplify(*body)
-          } else {
-            let body = self.in_snapshot(|this| {
-              this
-                .in_scope
-                .insert(var.id, Definition::BoundTo(simple_defn.clone(), occ));
-              this.simplify(*body)
-            });
-            self.rebuild(IR::local(var, simple_defn, body))
+            self.simplify(*body, in_scope, ctx)
+          }
+          // Inline and remove bindings used once.
+          Occurrence::Once => {
+            self.locals_inlined += 1;
+            let subst = self.subst.clone();
+            self.subst.insert(var.id, SubstRng::Suspend(*defn, subst));
+            self.simplify(*body, in_scope, ctx)
+          }
+          occ => {
+            ctx.push((ContextEntry::Local(var, occ, *body), self.subst.clone()));
+            self.simplify(*defn, in_scope, ctx)
           }
         }
       }
       IR::Var(v) => match self.subst.remove(&v.id) {
         Some(SubstRng::Suspend(ir, subst)) => {
           self.subst = subst;
-          self.simplify(ir)
+          self.simplify(ir, in_scope, ctx)
         }
         Some(SubstRng::Done(ir)) => {
           self.subst = Subst::default();
-          self.simplify(ir)
+          self.simplify(ir, in_scope, ctx)
         }
-        None => match self.in_scope.get(&v.id) {
+        None => match in_scope.get(&v.id) {
           None => panic!("ICE: Unbound variable encountered in simplification"),
-          Some(Definition::BoundTo(ir, occ)) if self.should_inline(ir, *occ) => {
+          Some(Definition::BoundTo(ir, occ)) if self.should_inline(ir, *occ, &ctx) => {
             self.subst = Subst::default();
-            self.simplify(ir.clone())
+            // If we inlined a OnceInFun occurrence mark its binding as dead.
+            // This prevents us from having to run more simplification passes to clean up dead
+            // bindings
+            if let Occurrence::OnceInFun = occ {
+              self.occs.mark_dead(&v.id);
+            }
+            self.simplify(ir.clone(), in_scope, ctx)
           }
-          Some(_) => self.rebuild(IR::Var(v)),
+          Some(_) => self.rebuild(IR::Var(v), in_scope, ctx),
         },
       },
-      IR::Int(i) => self.rebuild(IR::Int(i)),
+      IR::Int(i) => self.rebuild(IR::Int(i), in_scope, ctx),
     }
   }
 
-  fn should_inline(&self, ir: &IR, occ: Occurrence) -> bool {
+  fn should_inline(&self, ir: &IR, occ: Occurrence, ctx: &Context) -> bool {
     match occ {
       Occurrence::Dead | Occurrence::Once => panic!("ICE: should_inline encountered unexpected dead or once occurrence. This should've been handled prior"),
-      Occurrence::OnceInFun => ir.is_value() && self.some_benefit(ir),
-      Occurrence::Many => ir.is_value() && self.should_inline_multi(ir),
+      Occurrence::OnceInFun => ir.is_value() && self.some_benefit(ir, ctx),
+      Occurrence::Many => ir.is_value() && self.should_inline_multi(ir, ctx),
     }
   }
 
-  fn should_inline_multi(&self, ir: &IR) -> bool {
-    ir.size() == 0 || (self.some_benefit(ir) && ir.size() <= self.inline_size_threshold)
+  fn should_inline_multi(&self, ir: &IR, ctx: &Context) -> bool {
+    ir.size() == 0 || (self.some_benefit(ir, ctx) && ir.size() <= self.inline_size_threshold)
   }
 
   fn did_no_work(&self) -> bool {
@@ -450,32 +425,16 @@ impl Simplifier {
   }
 }
 
-pub fn simplify(ir: IR) -> IR {
-  ir.within_toplevel_funs(|params, mut ir| {
-    let in_scope: InScope = params
-      .iter()
-      .filter_map(|param| match param {
-        Param::Val(var) => Some(var.id),
-        Param::Ty(_) => None,
-      })
-      .map(|var| (var, Definition::Unknown))
-      .collect();
-    for _ in 0..4 {
-      let (simple_ir, occs) = occurrence_analysis(ir);
-      let mut simplifier = Simplifier::new(in_scope.clone(), occs);
-      ir = simplifier.simplify(simple_ir);
-      println!(
-        "{}\n{}\n{}",
-        simplifier.saturated_fun_count,
-        simplifier.saturated_ty_fun_count,
-        pretty_string(ir.clone(), 80)
-      );
-      if simplifier.did_no_work() {
-        break;
-      }
+pub fn simplify(mut ir: IR) -> IR {
+  for _ in 0..2 {
+    let (_, occs) = occurrence_analysis(&ir);
+    let mut simplifier = Simplifier::new(occs);
+    ir = simplifier.simplify(ir, InScope::default(), vec![]);
+    if simplifier.did_no_work() {
+      break;
     }
-    ir
-  })
+  }
+  ir
 }
 
 #[cfg(test)]
@@ -488,8 +447,15 @@ mod tests {
   fn simplify(ast: Ast<ast::Var>) -> IR {
     let (ast, scheme) = type_infer(ast).expect("Type checking failed");
     let (ir, _) = lower(ast, scheme);
-    println!("{}", pretty_string(ir.clone(), 80));
     crate::simplify(ir)
+  }
+
+  fn make_vars<const N: usize>() -> [ast::Var; N] {
+    let mut vars = [ast::Var(0); N];
+    for (i, var) in vars.iter_mut().enumerate() {
+      *var = ast::Var(i);
+    }
+    vars
   }
 
   fn locals(
@@ -507,9 +473,7 @@ mod tests {
 
   #[test]
   fn simple_removes_unused_vars() {
-    let x = ast::Var(0);
-    let y = ast::Var(1);
-    let z = ast::Var(2);
+    let [x, y, z] = make_vars();
     let ast = Ast::fun(x, locals([(y, Ast::Int(1)), (z, Ast::Int(2))], Ast::Var(x)));
 
     let ir = simplify(ast);
@@ -523,8 +487,7 @@ mod tests {
 
   #[test]
   fn simple_inline_once() {
-    let y = ast::Var(0);
-    let z = ast::Var(1);
+    let [y, z] = make_vars();
     let ast = Ast::app(
       Ast::fun(y, Ast::app(Ast::Var(y), Ast::Int(157))),
       Ast::fun(z, Ast::Var(z)),
@@ -538,8 +501,7 @@ mod tests {
 
   #[test]
   fn simple_many_trivial_expression_is_inlined() {
-    let x = ast::Var(0);
-    let f = ast::Var(1);
+    let [x, f] = make_vars();
     let ast = Ast::app(
       Ast::fun(
         x,
@@ -558,16 +520,13 @@ mod tests {
 
     let expect = expect_test::expect![[r#"
         (fun [V1]
-          (V1 (3005 (V1 (3005 3005)))))"#]];
+          (V1 3005 (V1 3005 3005)))"#]];
     expect.assert_eq(&pretty_string(ir, 80));
   }
 
   #[test]
   fn simple_once_nontrivial_expression_is_inlined() {
-    let x = ast::Var(0);
-    let y = ast::Var(1);
-    let f = ast::Var(2);
-
+    let [x, y, f] = make_vars();
     let ast = Ast::fun(
       f,
       Ast::app(
@@ -587,10 +546,7 @@ mod tests {
 
   #[test]
   fn simple_many_nontrivial_expression_is_not_inlined() {
-    let x = ast::Var(0);
-    let y = ast::Var(1);
-    let f = ast::Var(2);
-
+    let [x, y, f] = make_vars();
     let ast = Ast::app(
       Ast::fun(
         x,
@@ -603,7 +559,96 @@ mod tests {
 
     let expect = expect_test::expect![[r#"
         (ty_fun [Type Type]
-          (let [(V0 (fun [V2] (V2 3005)))] (fun [V1] (V1 (V0 V0)))))"#]];
+          (let
+            [(V0 (fun [V2] (V2 3005)))]
+            (fun [V1]
+              (V1 V0 V0))))"#]];
+    expect.assert_eq(&pretty_string(ir, 80));
+  }
+
+  #[test]
+  fn simple_onceinfun_uninteresting_context_is_not_inlined() {
+    let [x, y, f] = make_vars();
+    let ast = Ast::app(
+      Ast::fun(f, Ast::fun(x, Ast::Var(f))),
+      Ast::fun(y, Ast::app(Ast::Var(y), Ast::Int(3005))),
+    );
+
+    let ir = simplify(ast);
+
+    let expect = expect_test::expect![[r#"
+        (ty_fun [Type Type]
+          (let
+            [(V0 (fun [V2] (V2 3005)))]
+            (fun [V1]
+              V0)))"#]];
+    expect.assert_eq(&pretty_string(ir, 80));
+  }
+
+  #[test]
+  fn simple_onceinfun_interesting_arg_is_inlined() {
+    let [x, y, w, f, g, h] = make_vars();
+    // An interesting arg is any expression that isn't trivial.
+    // We use a function for that purpose here.
+    let interesting_arg = Ast::fun(g, Ast::Var(g));
+    let ast = Ast::app(
+      Ast::fun(f, Ast::fun(x, Ast::app(Ast::Var(f), interesting_arg))),
+      Ast::fun(
+        y,
+        Ast::fun(w, Ast::app(Ast::Var(y), Ast::fun(h, Ast::Var(h)))),
+      ),
+    );
+
+    let ir = simplify(ast);
+
+    let expect = expect_test::expect![[r#"
+        (ty_fun [Type Type Type]
+          (fun [V1, V4, V5]
+            V5))"#]];
+    expect.assert_eq(&pretty_string(ir, 80));
+  }
+
+  #[test]
+  fn simple_big_expr() {
+    let [a, b, c, d, e, f, g, h, i, j, k, l, m] = make_vars();
+    let ast = locals(
+      [
+        (
+          a,
+          locals(
+            [(
+              b,
+              locals(
+                [(
+                  c,
+                  locals([(d, locals([(e, Ast::Int(1))], Ast::Var(e)))], Ast::Var(d)),
+                )],
+                Ast::Var(c),
+              ),
+            )],
+            Ast::Var(b),
+          ),
+        ),
+        (i, Ast::Int(2)),
+        (g, Ast::Int(3)),
+        (h, Ast::Int(4)),
+        (
+          f,
+          Ast::fun(j, Ast::fun(k, Ast::fun(l, Ast::fun(m, Ast::Var(j))))),
+        ),
+      ],
+      Ast::app(
+        Ast::app(
+          Ast::app(Ast::app(Ast::Var(f), Ast::Var(a)), Ast::Var(i)),
+          Ast::Var(g),
+        ),
+        Ast::Var(h),
+      ),
+    );
+
+    let ir = simplify(ast);
+
+    let expect = expect_test::expect!["1"];
     expect.assert_eq(&pretty_string(ir, 80));
   }
 }

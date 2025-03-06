@@ -5,6 +5,8 @@ edition = "2021"
 
 [dependencies]
 lowering-base.workspace = true
+pretty.workspace = true
+im.workspace = true
 
 [dev-dependencies]
 expect-test.workspace = true

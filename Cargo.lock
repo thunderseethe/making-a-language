@@ -142,7 +142,9 @@ name = "simplify-base"
 version = "0.1.0"
 dependencies = [
  "expect-test",
+ "im",
  "lowering-base",
+ "pretty",
  "types-base",
 ]
 
