@@ -1,6 +1,6 @@
-use std::collections::HashSet;
-
 use im::HashMap;
+use std::collections::HashSet;
+use std::ops::ControlFlow;
 
 use lowering_base::{Kind, Type, Var, VarId, IR};
 
@@ -230,7 +230,6 @@ struct Simplifier {
   // state to perform simplification
   occs: Occurrences,
   subst: Subst,
-  //ctx: Context,
 
   // stats, used to determine if we simplified
   saturated_fun_count: usize,
@@ -297,127 +296,148 @@ impl Simplifier {
     matches!(ctx.get(params.len()), Some((ContextEntry::App(_), _)))
   }
 
-  fn rebuild(&mut self, ir: IR, in_scope: InScope, mut ctx: Context) -> IR {
-    let Some((entry, subst)) = ctx.pop() else {
-      return ir;
-    };
-    self.subst = subst;
-    match entry {
-      ContextEntry::App(arg) => {
-        if let IR::Fun(var, body) = ir {
-          self.saturated_fun_count += 1;
-          let ir = IR::local(var, arg, *body);
-          self.simplify(ir, in_scope, ctx)
-        } else {
-          let arg = self.simplify(arg, in_scope.clone(), vec![]);
-          let app = IR::app(ir, arg);
-          self.rebuild(app, in_scope, ctx)
-        }
-      }
-      ContextEntry::TyApp(ty) => {
-        let ir = if let IR::TyFun(_, body) = ir {
-          self.saturated_ty_fun_count += 1;
-          subst_ty(*body, ty)
-        } else {
-          IR::ty_app(ir, ty)
-        };
-        self.rebuild(ir, in_scope, ctx)
-      }
-      ContextEntry::Local(var, occ, body) => {
-        if ir.is_trivial() {
-          self.locals_inlined += 1;
-          self.subst.insert(var.id, SubstRng::Done(ir));
-          self.simplify(body, in_scope, ctx)
-        } else {
-          let body = self.simplify(body, in_scope.update(var.id, Definition::BoundTo(ir.clone(), occ)), vec![]);
-          // We might have inlined all occurrences of var while simplifying body
-          if let Occurrence::Dead = self.occs.lookup_var(&var) {
-            self.rebuild(body, in_scope, ctx)
+  fn rebuild(&mut self, mut ir: IR, in_scope: InScope, mut ctx: Context) -> IR {
+    while let Some((entry, subst)) = ctx.pop() {
+      self.subst = subst;
+      match entry {
+        ContextEntry::App(arg) => {
+          if let IR::Fun(var, body) = ir {
+            self.saturated_fun_count += 1;
+            return self.simplify(IR::local(var, arg, *body), in_scope, ctx);
           } else {
-            self.rebuild(IR::local(var, ir, body), in_scope, ctx)
+            let arg = self.simplify(arg, in_scope.clone(), vec![]);
+            ir = IR::app(ir, arg);
           }
         }
+        ContextEntry::TyApp(ty) => {
+          ir = if let IR::TyFun(_, body) = ir {
+            self.saturated_ty_fun_count += 1;
+            subst_ty(*body, ty)
+          } else {
+            IR::ty_app(ir, ty)
+          }
+        }
+        ContextEntry::Local(var, occ, body) => {
+          if ir.is_trivial() {
+            self.locals_inlined += 1;
+            self.subst.insert(var.id, SubstRng::Done(ir));
+            return self.simplify(body, in_scope, ctx);
+          } else {
+            let body = self.simplify(
+              body,
+              in_scope.update(var.id, Definition::BoundTo(ir.clone(), occ)),
+              vec![],
+            );
+            // We might have inlined all occurrences of var while simplifying body.
+            // If our binding is now dead, remove it.
+            ir = if let Occurrence::Dead = self.occs.lookup_var(&var) {
+              body
+            } else {
+              IR::local(var, ir, body)
+            };
+          }
+        }
+      }
+    }
+    ir
+  }
+
+  fn simplify(&mut self, mut ir: IR, in_scope: InScope, mut ctx: Context) -> IR {
+    loop {
+      ir = match ir {
+        IR::App(fun, arg) => {
+          ctx.push((ContextEntry::App(*arg), self.subst.clone()));
+          *fun
+        }
+        IR::TyApp(ty_fun, ty_app) => {
+          ctx.push((ContextEntry::TyApp(ty_app), self.subst.clone()));
+          *ty_fun
+        }
+        IR::Int(i) => break self.rebuild(IR::Int(i), in_scope, ctx),
+        IR::TyFun(kind, body) => {
+          let body = self.simplify(*body, in_scope.clone(), vec![]);
+          break self.rebuild(IR::ty_fun(kind, body), in_scope, ctx);
+        }
+        IR::Fun(var, body) => {
+          let body = self.simplify(*body, in_scope.update(var.id, Definition::Unknown), vec![]);
+          break self.rebuild(IR::fun(var, body), in_scope, ctx);
+        }
+        IR::Local(var, defn, body) => self.simplify_local(var, *defn, *body, &mut ctx),
+        IR::Var(var) => match self.simplify_var(var, in_scope.clone(), &ctx) {
+          ControlFlow::Continue(ir) => ir,
+          ControlFlow::Break(var) => break self.rebuild(IR::Var(var), in_scope, ctx),
+        },
       }
     }
   }
 
-  fn simplify(&mut self, ir: IR, in_scope: InScope, mut ctx: Context) -> IR {
-    match ir {
-      IR::App(fun, arg) => {
-        ctx.push((ContextEntry::App(*arg), self.subst.clone()));
-        self.simplify(*fun, in_scope, ctx)
+  fn simplify_local(&mut self, var: Var, defn: IR, body: IR, ctx: &mut Context) -> IR {
+    match self.occs.lookup_var(&var) {
+      // Throwaway dead bindings.
+      Occurrence::Dead => {
+        self.locals_inlined += 1;
+        body
       }
-      IR::TyApp(ty_fun, ty_app) => {
-        ctx.push((ContextEntry::TyApp(ty_app), self.subst.clone()));
-        self.simplify(*ty_fun, in_scope, ctx)
+      // Inline and remove locals used once.
+      Occurrence::Once => {
+        self.locals_inlined += 1;
+        let subst = self.subst.clone();
+        self.subst.insert(var.id, SubstRng::Suspend(defn, subst));
+        body
       }
-      IR::TyFun(kind, body) => {
-        let body = self.simplify(*body, in_scope.clone(), vec![]);
-        self.rebuild(IR::ty_fun(kind, body), in_scope, ctx)
+      occ => {
+        ctx.push((ContextEntry::Local(var, occ, body), self.subst.clone()));
+        defn
       }
-      IR::Fun(var, body) => {
-        let body = self.simplify(*body, in_scope.update(var.id, Definition::Unknown), vec![]);
-        self.rebuild(IR::fun(var, body), in_scope, ctx)
-      }
-      IR::Local(var, defn, body) => {
-        let occ = self.occs.lookup_var(&var);
-        match occ {
-          // Throwaway dead bindings.
-          Occurrence::Dead => {
-            self.locals_inlined += 1;
-            self.simplify(*body, in_scope, ctx)
-          }
-          // Inline and remove bindings used once.
-          Occurrence::Once => {
-            self.locals_inlined += 1;
-            let subst = self.subst.clone();
-            self.subst.insert(var.id, SubstRng::Suspend(*defn, subst));
-            self.simplify(*body, in_scope, ctx)
-          }
-          occ => {
-            ctx.push((ContextEntry::Local(var, occ, *body), self.subst.clone()));
-            self.simplify(*defn, in_scope, ctx)
-          }
-        }
-      }
-      IR::Var(v) => match self.subst.remove(&v.id) {
-        Some(SubstRng::Suspend(ir, subst)) => {
-          self.subst = subst;
-          self.simplify(ir, in_scope, ctx)
-        }
-        Some(SubstRng::Done(ir)) => {
-          self.subst = Subst::default();
-          self.simplify(ir, in_scope, ctx)
-        }
-        None => match in_scope.get(&v.id) {
-          None => panic!("ICE: Unbound variable encountered in simplification"),
-          Some(Definition::BoundTo(ir, occ)) if self.should_inline(ir, *occ, &ctx) => {
-            self.subst = Subst::default();
-            // If we inlined a OnceInFun occurrence mark its binding as dead.
-            // This prevents us from having to run more simplification passes to clean up dead
-            // bindings
-            if let Occurrence::OnceInFun = occ {
-              self.occs.mark_dead(&v.id);
-            }
-            self.simplify(ir.clone(), in_scope, ctx)
-          }
-          Some(_) => self.rebuild(IR::Var(v), in_scope, ctx),
-        },
-      },
-      IR::Int(i) => self.rebuild(IR::Int(i), in_scope, ctx),
     }
+  }
+
+  fn simplify_var(&mut self, var: Var, in_scope: InScope, ctx: &Context) -> ControlFlow<Var, IR> {
+    match self.subst.remove(&var.id) {
+      Some(SubstRng::Suspend(payload, subst)) => {
+        self.subst = subst;
+        ControlFlow::Continue(payload)
+      }
+      Some(SubstRng::Done(payload)) => {
+        self.subst = Subst::default();
+        ControlFlow::Continue(payload)
+      }
+      None => self.callsite_inline(var, in_scope, ctx),
+    }
+  }
+
+  fn callsite_inline(&mut self, var: Var, in_scope: InScope, ctx: &Context) -> ControlFlow<Var, IR> {
+    in_scope
+      .get(&var.id)
+      .map(|bind| match bind {
+        Definition::BoundTo(payload, occ) if self.should_inline(payload, *occ, ctx) => {
+          self.subst = Subst::default();
+          // If we inlined a OnceInFun occurrence, mark its binding as dead.
+          // This prevents us from having to run more simplification passes to clean up dead
+          // bindings
+          if let Occurrence::OnceInFun = occ {
+            self.occs.mark_dead(&var.id);
+          }
+          ControlFlow::Continue(payload.clone())
+        }
+        _ => ControlFlow::Break(var),
+      })
+      .expect("ICE: Unbound variable encountered in simplification")
   }
 
   fn should_inline(&self, ir: &IR, occ: Occurrence, ctx: &Context) -> bool {
     match occ {
       Occurrence::Dead | Occurrence::Once => panic!("ICE: should_inline encountered unexpected dead or once occurrence. This should've been handled prior"),
       Occurrence::OnceInFun => ir.is_value() && self.some_benefit(ir, ctx),
-      Occurrence::Many => ir.is_value() && self.should_inline_multi(ir, ctx),
+      Occurrence::Many => {
+          let size = ir.size();
+          let no_size_increase = size == 0;
+          let small_enough = size <= self.inline_size_threshold;
+          ir.is_value()
+          && (no_size_increase
+                || (small_enough && self.some_benefit(ir, ctx)))
+      },
     }
-  }
-
-  fn should_inline_multi(&self, ir: &IR, ctx: &Context) -> bool {
-    ir.size() == 0 || (self.some_benefit(ir, ctx) && ir.size() <= self.inline_size_threshold)
   }
 
   fn did_no_work(&self) -> bool {
