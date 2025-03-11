@@ -235,26 +235,27 @@ where
             .append(defn.pretty(a))
             .parens()
         };
-        let single = 
-          a.intersperse(
+        let single = a
+          .intersperse(
             locals.clone().into_iter().map(pretty_local),
             a.text(",").append(a.space()),
           )
           .brackets()
           .group();
-        let multi = a.space()
-              .append(a.intersperse(
-                locals.into_iter().map(pretty_local),
-                a.hardline().append(a.text(",")).append(a.space()),
-              ))
-              .append(a.hardline())
-              .brackets()
-              .align();
+        let multi = a.hardline().append(
+          a.space()
+            .append(a.intersperse(
+              locals.into_iter().map(pretty_local),
+              a.hardline().append(a.text(",")).append(a.space()),
+            ))
+            .append(a.hardline())
+            .brackets()
+            .align(),
+        ).nest(2);
 
         a.text("let")
-          .append(a.hardline()
-          .append(multi.flat_alt(single).group())
-          .append(a.hardline().append(body.pretty(a))).nest(2))
+          .append(multi.flat_alt(single))
+          .append(a.line().append(body.pretty(a)).nest(2))
           .parens()
           .group()
       }

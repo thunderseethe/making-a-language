@@ -131,17 +131,17 @@ where
   }
 }
 
-impl<'a, D> Pretty<'a, D> for TyApp 
+impl<'a, D> Pretty<'a, D> for TyApp
 where
   D: DocAllocator<'a>,
   DocBuilder<'a, D>: Clone + 'a,
 {
-    fn pretty(self, a: &'a D) -> DocBuilder<'a, D, ()> {
-        match self {
-            TyApp::Ty(ty) => a.text("Ty").append(ty.pretty(a).parens()),
-            TyApp::Row(row) => a.text("Row").append(row.pretty(a).parens()),
-        }
+  fn pretty(self, a: &'a D) -> DocBuilder<'a, D, ()> {
+    match self {
+      TyApp::Ty(ty) => a.text("Ty").append(ty.pretty(a).parens()),
+      TyApp::Row(row) => a.text("Row").append(row.pretty(a).parens()),
     }
+  }
 }
 
 impl IR {

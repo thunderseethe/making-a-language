@@ -436,10 +436,10 @@ impl Row {
   }
 }
 
-type TypeEnv = HashMap<AstTypeVar, TypeVar>;
+
 
 struct LowerTypes {
-  env: TypeEnv,
+  env: HashMap<AstTypeVar, TypeVar>,
 }
 impl LowerTypes {
   fn lower_closed_row_ty(&self, closed_row: ast::ClosedRow) -> Vec<Type> {
@@ -522,7 +522,7 @@ impl LowerTypes {
 
 fn lower_ty_scheme(scheme: ast::TypeScheme) -> (Type, Vec<Kind>, LowerTypes) {
   let mut kinds = vec![Kind::Type; scheme.unbound_tys.len() + scheme.unbound_rows.len()];
-  let ty_env: TypeEnv = scheme
+  let ty_env: HashMap<AstTypeVar, TypeVar> = scheme
     .unbound_tys
     .into_iter()
     .map(AstTypeVar::Ty)
@@ -927,6 +927,7 @@ impl LowerAst {
         let ty = self.item_source.lookup_item(item_id);
         let item_ir = IR::Item(ty, self.item_supply.supply_for(item_id));
         let wrapper = wrapper.expect("ICE: Item lacks expected wrapper");
+
         let ty_ir = wrapper.types.into_iter().fold(item_ir, |ir, ty| {
           IR::ty_app(ir, TyApp::Ty(self.types.lower_ty(ty)))
         });

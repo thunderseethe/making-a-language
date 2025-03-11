@@ -4,6 +4,7 @@ use crate::ast::{Ast, BranchMeta, ItemWrapper, TypedVar};
 use crate::ty::{ClosedRow, Row, RowCombination, RowUniVar, RowVar, Type, TypeUniVar, TypeVar};
 use crate::{Evidence, TypeInference};
 
+#[derive(Debug)]
 pub struct SubstOut<T> {
   pub unbound_tys: BTreeSet<TypeVar>,
   pub unbound_rows: BTreeSet<RowVar>,

@@ -85,8 +85,10 @@ impl Row {
   /// that is helpful during unification.
   pub fn equatable(&self, other: &Self) -> bool {
     match (self, other) {
-      // Open rows are equatable when their variables are equal
+      // Unifier rows are equatable when their variables are equal
       (Row::Unifier(a), Row::Unifier(b)) => a == b,
+      // Open rows are equatable when their variables are equal
+      (Row::Open(a), Row::Open(b)) => a == b,
       // Closed rows are equatable when their fields are equal
       (Row::Closed(a), Row::Closed(b)) => a.fields == b.fields,
       // Anything else is not equatable
