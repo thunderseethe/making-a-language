@@ -1,10 +1,11 @@
 [package]
-name = "simplify-base"
+name = "monomorph-base"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
 lowering-base.workspace = true
+simplify-base.workspace = true
 im.workspace = true
 
 [dev-dependencies]

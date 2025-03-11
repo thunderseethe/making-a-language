@@ -8,10 +8,22 @@ pub mod pretty;
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 pub struct VarId(usize);
 
-#[derive(Debug, Eq, PartialEq, Clone)]
+#[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub struct Var {
   pub id: VarId,
   pub ty: Type,
+}
+
+impl PartialOrd for Var {
+  fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+    Some(self.cmp(other))
+  }
+}
+
+impl Ord for Var {
+  fn cmp(&self, other: &Self) -> Ordering {
+    self.id.cmp(&other.id)
+  }
 }
 
 impl Var {
@@ -35,7 +47,7 @@ pub enum Kind {
   Type,
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, Hash)]
 pub enum Type {
   Int,
   Var(TypeVar),
@@ -78,7 +90,7 @@ impl Type {
 
 #[derive(Clone)]
 enum Subst {
-    TyPayload(Type)
+  TyPayload(Type),
 }
 impl Subst {
   fn shift(&mut self) {
@@ -161,7 +173,7 @@ impl IR {
     Self::Local(var, Box::new(defn), Box::new(body))
   }
 
-  fn type_of(&self) -> Type {
+  pub fn type_of(&self) -> Type {
     match self {
       IR::Var(v) => v.ty.clone(),
       IR::Int(_) => Type::Int,
@@ -194,7 +206,7 @@ impl IR {
 }
 
 #[derive(Default)]
-struct VarSupply {
+pub struct VarSupply {
   next: usize,
   cache: HashMap<ast::Var, VarId>,
 }
@@ -210,6 +222,12 @@ impl VarSupply {
         VarId(ir_var)
       })
       .to_owned()
+  }
+
+  pub fn supply(&mut self) -> VarId {
+    let ir_var = self.next;
+    self.next += 1;
+    VarId(ir_var)
   }
 }
 
@@ -242,9 +260,7 @@ fn lower_ty_scheme(scheme: ast::TypeScheme) -> (Type, LowerTypes) {
 
   let lower = LowerTypes { env: ty_env };
   let lower_ty = lower.lower_ty(scheme.ty);
-  let bound_lower_ty = (0..lower.env.len()).fold(lower_ty, |ty, _| {
-    Type::ty_fun(Kind::Type, ty)
-  });
+  let bound_lower_ty = (0..lower.env.len()).fold(lower_ty, |ty, _| Type::ty_fun(Kind::Type, ty));
   (bound_lower_ty, lower)
 }
 
@@ -276,29 +292,28 @@ impl LowerAst {
   }
 }
 
-pub fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
+pub fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type, VarSupply) {
   let (ir_ty, types) = lower_ty_scheme(scheme);
   let mut lower_ast = LowerAst {
     supply: VarSupply::default(),
     types,
   };
   let ir = lower_ast.lower_ast(ast);
-  let bound_ir = 
-    (0..lower_ast.types.env.len())
-      .fold(ir, |ir, _| IR::ty_fun(Kind::Type, ir));
-  (bound_ir, ir_ty)
+  let bound_ir = (0..lower_ast.types.env.len()).fold(ir, |ir, _| IR::ty_fun(Kind::Type, ir));
+  (bound_ir, ir_ty, lower_ast.supply)
 }
 
 #[cfg(test)]
 mod tests {
   use self::pretty::pretty_string;
 
-use super::*;
+  use super::*;
   use types_base::{self as ast, type_infer, Ast};
 
   fn lower_test(ast: Ast<ast::Var>) -> (IR, Type) {
     let (ast, scheme) = type_infer(ast).expect("Type inference to succeed");
-    lower(ast, scheme)
+    let (ir, ty, _) = lower(ast, scheme);
+    (ir, ty)
   }
 
   #[test]
@@ -392,6 +407,5 @@ use super::*;
         ty_fun [Type, Type, Type] .
           (T2 -> T1 -> T0) -> (T2 -> T1) -> T2 -> T0"#]];
     expect_ir_ty.assert_eq(pretty_string(ir_ty, 80).as_str());
-
   }
 }

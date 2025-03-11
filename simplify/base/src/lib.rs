@@ -4,17 +4,17 @@ use std::ops::ControlFlow;
 
 use lowering_base::{Kind, Type, Var, VarId, IR};
 
-enum Param {
+pub enum Param {
   Ty(Kind),
-  Val,
+  Val(Var),
 }
 
-trait IRExt {
+pub trait IRExt {
   fn is_trivial(&self) -> bool;
 
   fn is_value(&self) -> bool;
 
-  fn split_funs(&self) -> (Vec<Param>, &IR);
+  fn split_funs(self) -> (Vec<Param>, IR);
 
   fn size(&self) -> usize;
 }
@@ -33,16 +33,16 @@ impl IRExt for IR {
     }
   }
 
-  fn split_funs(&self) -> (Vec<Param>, &IR) {
-    fn split_funs<'a>(ir: &'a IR, params: &mut Vec<Param>) -> &'a IR {
+  fn split_funs(self) -> (Vec<Param>, IR) {
+    fn split_funs(ir: IR, params: &mut Vec<Param>) -> IR {
       match ir {
         IR::TyFun(kind, ir) => {
-          params.push(Param::Ty(*kind));
-          split_funs(ir, params)
+          params.push(Param::Ty(kind));
+          split_funs(*ir, params)
         }
-        IR::Fun(_, ir) => {
-          params.push(Param::Val);
-          split_funs(ir, params)
+        IR::Fun(var, ir) => {
+          params.push(Param::Val(var));
+          split_funs(*ir, params)
         }
         ir => ir,
       }
@@ -90,7 +90,7 @@ impl TypeExt for Type {
   }
 }
 
-fn subst_ty(haystack: IR, payload: Type) -> IR {
+pub fn subst_ty(haystack: IR, payload: Type) -> IR {
   match haystack {
     IR::Var(var) => IR::Var(var.map_ty(|ty| ty.subst_ty(payload))),
     IR::Int(i) => IR::Int(i),
@@ -271,7 +271,7 @@ impl Simplifier {
   }
 
   fn some_benefit(&self, ir: &IR, ctx: &Context) -> bool {
-    let (params, _) = ir.split_funs();
+    let (params, _) = ir.clone().split_funs();
     // If we have a non trivial argument in context, there's some benefit.
     if ctx
       .iter()
@@ -466,7 +466,7 @@ mod tests {
 
   fn simplify(ast: Ast<ast::Var>) -> IR {
     let (ast, scheme) = type_infer(ast).expect("Type checking failed");
-    let (ir, _) = lower(ast, scheme);
+    let (ir, _, _) = lower(ast, scheme);
     crate::simplify(ir)
   }
 

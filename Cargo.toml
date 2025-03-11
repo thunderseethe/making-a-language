@@ -1,13 +1,20 @@
+[package]
+name = "making-a-language"
+version = "0.1.0"
+edition = "2021"
+
 [workspace]
 members = [
+  "types/base",
+  "types/items",
+  "types/rows",
   "lowering/base",
   "lowering/rows",
   "lowering/items",
-  "types/base",
-  "types/items",
-  "types/rows", 
-  "simplify/base", 
-  "simplify/rows",
+  "simplify/base",
+  #"simplify/rows",
+  "monomorph/base",
+  "closure_convert/base",
 ]
 
 [workspace.dependencies]
@@ -16,13 +23,10 @@ types-rows = { path = "types/rows" }
 types-items = { path = "types/items" }
 lowering-base = { path = "lowering/base" }
 lowering-rows = { path = "lowering/rows" }
+simplify-base = { path = "simplify/base" }
+monomorph-base = { path = "monomorph/base" }
 ena = "0.14.2"
 im = "15.1"
 pretty_assertions = "1.4"
 expect-test = "1.5.1"
 pretty = "0.12.3"
-
-[package]
-name = "type-inference"
-version = "0.1.0"
-edition = "2021"
