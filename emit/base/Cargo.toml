@@ -1,0 +1,9 @@
+[package]
+name = "emit-base"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+closure-convert-base.workspace = true
+lowering-base.workspace = true
+wasm-encoder = "0.227.1"

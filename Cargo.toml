@@ -12,9 +12,9 @@ members = [
   "lowering/rows",
   "lowering/items",
   "simplify/base",
-  #"simplify/rows",
   "monomorph/base",
-  "closure_convert/base",
+  "closure_convert/base", 
+  "emit/base",
 ]
 
 [workspace.dependencies]
@@ -25,6 +25,7 @@ lowering-base = { path = "lowering/base" }
 lowering-rows = { path = "lowering/rows" }
 simplify-base = { path = "simplify/base" }
 monomorph-base = { path = "monomorph/base" }
+closure-convert-base = { path = "closure_convert/base" }
 ena = "0.14.2"
 im = "15.1"
 pretty_assertions = "1.4"
