@@ -3,6 +3,10 @@ use std::collections::BTreeSet;
 
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey};
 
+/// Extra utility methods for working with our AST. These are used to make constructing ASTs in
+/// tests easier.
+pub mod ast;
+
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 pub struct Var(pub usize);
 
