@@ -1,0 +1,11 @@
+[package]
+name = "base"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+expect-test.workspace = true
+
+[dependencies]
+syntree = "0.18"
+logos = "0.15"

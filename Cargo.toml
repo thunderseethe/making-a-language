@@ -14,7 +14,8 @@ members = [
   "simplify/base",
   "monomorph/base",
   "closure_convert/base", 
-  "emit/base",
+  "emit/base", 
+  "parser/base",
 ]
 
 [workspace.dependencies]
