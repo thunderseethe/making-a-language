@@ -1,0 +1,11 @@
+[package]
+name = "desugar-base"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+parser-base.workspace = true
+types-base.workspace = true
+
+im.workspace = true
+syntree.workspace = true

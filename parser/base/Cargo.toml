@@ -1,5 +1,5 @@
 [package]
-name = "base"
+name = "parser-base"
 version = "0.1.0"
 edition = "2021"
 
@@ -7,5 +7,5 @@ edition = "2021"
 expect-test.workspace = true
 
 [dependencies]
-syntree = "0.18"
+syntree.workspace = true
 logos = "0.15"

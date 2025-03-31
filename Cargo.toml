@@ -15,7 +15,8 @@ members = [
   "monomorph/base",
   "closure_convert/base", 
   "emit/base", 
-  "parser/base",
+  "parser/base", 
+  "desugar/base",
 ]
 
 [workspace.dependencies]
@@ -27,8 +28,12 @@ lowering-rows = { path = "lowering/rows" }
 simplify-base = { path = "simplify/base" }
 monomorph-base = { path = "monomorph/base" }
 closure-convert-base = { path = "closure_convert/base" }
+parser-base = { path = "parser/base" }
+desugar-base = { path = "desugar/base" }
+
 ena = "0.14.2"
+expect-test = "1.5.1"
 im = "15.1"
 pretty_assertions = "1.4"
-expect-test = "1.5.1"
 pretty = "0.12.3"
+syntree = "0.18"

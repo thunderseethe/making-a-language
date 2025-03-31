@@ -182,6 +182,7 @@ impl<'a> Parser<'a> {
 
   fn expr(&mut self) {
     self.with(Node::Lets, |this| {
+      this.whitespace();
       while this.input.at(Token::LetKw) {
         this.with(Node::Let, |this| {
           this.expect(Token::LetKw);
@@ -212,9 +213,7 @@ impl<'a> Parser<'a> {
 
   fn parse(mut self) -> Tree<Syntax, FlavorDefault> {
     self.with(Node::Program, |this| {
-      this.whitespace();
       this.expr();
-      this.whitespace();
     });
     self.builder.build().unwrap()
   }
@@ -244,8 +243,8 @@ y (
     syntree::print::print_with_source(&mut out, &tree, input).unwrap();
     let expect = expect_test::expect![[r#"
         Node(Program)@0..63
-          Token(Whitespaces)@0..1 "\n"
-          Node(Lets)@1..63
+          Node(Lets)@0..63
+            Token(Whitespaces)@0..1 "\n"
             Node(Let)@1..18
               Token(LetKw)@1..4 "let"
               Token(Whitespaces)@4..5 " "
@@ -333,8 +332,8 @@ x y
 
     let expect = expect_test::expect![[r#"
         Node(Program)@0..34
-          Token(Whitespaces)@0..1 "\n"
-          Node(Lets)@1..34
+          Node(Lets)@0..34
+            Token(Whitespaces)@0..1 "\n"
             Node(Let)@1..20
               Token(LetKw)@1..4 "let"
               Token(Whitespaces)@4..5 " "
@@ -393,8 +392,8 @@ let x_y_2 = ( \ x ->
 
     let expect = expect_test::expect![[r#"
         Node(Program)@0..59
-          Token(Whitespaces)@0..1 "\n"
-          Node(Lets)@1..59
+          Node(Lets)@0..59
+            Token(Whitespaces)@0..1 "\n"
             Node(Let)@1..59
               Token(LetKw)@1..4 "let"
               Token(Whitespaces)@4..5 " "
