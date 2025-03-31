@@ -864,6 +864,17 @@ dependencies = [
 [[package]]
 name = "making-a-language"
 version = "0.1.0"
+dependencies = [
+ "closure-convert-base",
+ "desugar-base",
+ "emit-base",
+ "lowering-base",
+ "monomorph-base",
+ "name-resolution-base",
+ "parser-base",
+ "simplify-base",
+ "types-base",
+]
 
 [[package]]
 name = "memchr"
@@ -888,6 +899,16 @@ dependencies = [
  "im",
  "lowering-base",
  "simplify-base",
+ "types-base",
+]
+
+[[package]]
+name = "name-resolution-base"
+version = "0.1.0"
+dependencies = [
+ "desugar-base",
+ "im",
+ "parser-base",
  "types-base",
 ]
 

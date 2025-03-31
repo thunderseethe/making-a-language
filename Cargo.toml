@@ -3,6 +3,15 @@ name = "making-a-language"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "lib"
+path = "src/lib.rs"
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "making-a-language"
+path = "src/main.rs"
+
 [workspace]
 members = [
   "types/base",
@@ -16,7 +25,7 @@ members = [
   "closure_convert/base", 
   "emit/base", 
   "parser/base", 
-  "desugar/base",
+  "desugar/base", "name_resolution/base",
 ]
 
 [workspace.dependencies]
@@ -28,8 +37,10 @@ lowering-rows = { path = "lowering/rows" }
 simplify-base = { path = "simplify/base" }
 monomorph-base = { path = "monomorph/base" }
 closure-convert-base = { path = "closure_convert/base" }
+emit-base = { path = "emit/base" }
 parser-base = { path = "parser/base" }
 desugar-base = { path = "desugar/base" }
+name-resolution-base = { path = "name_resolution/base" }
 
 ena = "0.14.2"
 expect-test = "1.5.1"
@@ -37,3 +48,15 @@ im = "15.1"
 pretty_assertions = "1.4"
 pretty = "0.12.3"
 syntree = "0.18"
+wasmtime = "31" 
+
+[dependencies]
+parser-base.workspace = true
+desugar-base.workspace = true
+name-resolution-base.workspace = true
+types-base.workspace = true
+lowering-base.workspace = true
+simplify-base.workspace = true
+monomorph-base.workspace = true
+closure-convert-base.workspace = true
+emit-base.workspace = true
