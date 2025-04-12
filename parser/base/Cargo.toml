@@ -9,3 +9,5 @@ expect-test.workspace = true
 [dependencies]
 syntree.workspace = true
 logos = "0.15"
+rowan = "0.16"
+enum-iterator = "2.1.0"

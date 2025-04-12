@@ -272,18 +272,18 @@ struct LowerAst {
 impl LowerAst {
   fn lower_ast(&mut self, ast: Ast<TypedVar>) -> IR {
     match ast {
-      Ast::Var(TypedVar(var, ty)) => IR::Var(Var::new(
+      Ast::Var(_, TypedVar(var, ty)) => IR::Var(Var::new(
         self.supply.supply_for(var),
         self.types.lower_ty(ty),
       )),
-      Ast::Int(i) => IR::Int(i),
-      Ast::Fun(TypedVar(var, ty), body) => {
+      Ast::Int(_, i) => IR::Int(i),
+      Ast::Fun(_, TypedVar(var, ty), body) => {
         let ir_ty = self.types.lower_ty(ty);
         let ir_var = self.supply.supply_for(var);
         let ir_body = self.lower_ast(*body);
         IR::fun(Var::new(ir_var, ir_ty), ir_body)
       }
-      Ast::App(fun, arg) => {
+      Ast::App(_, fun, arg) => {
         let ir_fun = self.lower_ast(*fun);
         let ir_arg = self.lower_ast(*arg);
         IR::app(ir_fun, ir_arg)
@@ -308,6 +308,7 @@ mod tests {
   use self::pretty::pretty_string;
 
   use super::*;
+  use types_base::builder::AstBuilder;
   use types_base::{self as ast, type_infer, Ast};
 
   fn lower_test(ast: Ast<ast::Var>) -> (IR, Type) {
@@ -318,7 +319,8 @@ mod tests {
 
   #[test]
   fn lower_int() {
-    let ast = Ast::Int(3);
+    let b = AstBuilder::default();
+    let ast = b.int(3);
 
     let (ir, ir_ty) = lower_test(ast);
 
@@ -333,8 +335,9 @@ mod tests {
 
   #[test]
   fn lower_id_fun() {
+    let b = AstBuilder::default();
     let x = ast::Var(0);
-    let ast = Ast::fun(x, Ast::Var(x));
+    let ast = b.fun(x, b.var(x));
 
     let (ir, ir_ty) = lower_test(ast);
 
@@ -354,9 +357,10 @@ mod tests {
 
   #[test]
   fn lower_k_combinator() {
+    let b = AstBuilder::default();
     let x = ast::Var(0);
     let y = ast::Var(1);
-    let ast = Ast::fun(x, Ast::fun(y, Ast::Var(x)));
+    let ast = b.funs([x, y], b.var(x));
 
     let (ir, ir_ty) = lower_test(ast);
 
@@ -376,21 +380,13 @@ mod tests {
 
   #[test]
   fn lower_s_combinator() {
+    let b = AstBuilder::default();
     let x = ast::Var(0);
     let y = ast::Var(1);
     let z = ast::Var(2);
-    let ast = Ast::fun(
-      x,
-      Ast::fun(
-        y,
-        Ast::fun(
-          z,
-          Ast::app(
-            Ast::app(Ast::Var(x), Ast::Var(z)),
-            Ast::app(Ast::Var(y), Ast::Var(z)),
-          ),
-        ),
-      ),
+    let ast = b.funs(
+      [x, y, z],
+      b.app(b.app(b.var(x), b.var(z)), b.app(b.var(y), b.var(z))),
     );
 
     let (ir, ir_ty) = lower_test(ast);

@@ -406,7 +406,12 @@ impl Simplifier {
     }
   }
 
-  fn callsite_inline(&mut self, var: Var, in_scope: InScope, ctx: &Context) -> ControlFlow<Var, IR> {
+  fn callsite_inline(
+    &mut self,
+    var: Var,
+    in_scope: InScope,
+    ctx: &Context,
+  ) -> ControlFlow<Var, IR> {
     in_scope
       .get(&var.id)
       .map(|bind| match bind {
@@ -460,6 +465,7 @@ pub fn simplify(mut ir: IR) -> IR {
 #[cfg(test)]
 mod tests {
   use lowering_base::{lower, pretty::pretty_string};
+  use types_base::builder::{make_vars, AstBuilder};
   use types_base::{self as ast, type_infer, Ast};
 
   use super::*;
@@ -470,31 +476,11 @@ mod tests {
     crate::simplify(ir)
   }
 
-  fn make_vars<const N: usize>() -> [ast::Var; N] {
-    let mut vars = [ast::Var(0); N];
-    for (i, var) in vars.iter_mut().enumerate() {
-      *var = ast::Var(i);
-    }
-    vars
-  }
-
-  fn locals(
-    binds: impl IntoIterator<Item = (ast::Var, Ast<ast::Var>)>,
-    body: Ast<ast::Var>,
-  ) -> Ast<ast::Var> {
-    binds
-      .into_iter()
-      .collect::<Vec<_>>()
-      .into_iter()
-      .rfold(body, |body, (var, defn)| {
-        Ast::app(Ast::fun(var, body), defn)
-      })
-  }
-
   #[test]
   fn simple_removes_unused_vars() {
+    let b = AstBuilder::default();
     let [x, y, z] = make_vars();
-    let ast = Ast::fun(x, locals([(y, Ast::Int(1)), (z, Ast::Int(2))], Ast::Var(x)));
+    let ast = b.fun(x, b.locals([(y, b.int(1)), (z, b.int(2))], b.var(x)));
 
     let ir = simplify(ast);
 
@@ -507,11 +493,9 @@ mod tests {
 
   #[test]
   fn simple_inline_once() {
+    let b = AstBuilder::default();
     let [y, z] = make_vars();
-    let ast = Ast::app(
-      Ast::fun(y, Ast::app(Ast::Var(y), Ast::Int(157))),
-      Ast::fun(z, Ast::Var(z)),
-    );
+    let ast = b.app(b.fun(y, b.app(b.var(y), b.int(157))), b.fun(z, b.var(z)));
 
     let ir = simplify(ast);
 
@@ -521,19 +505,15 @@ mod tests {
 
   #[test]
   fn simple_many_trivial_expression_is_inlined() {
-    let [x, f] = make_vars();
-    let ast = Ast::app(
-      Ast::fun(
-        x,
-        Ast::fun(
-          f,
-          Ast::app(
-            Ast::app(Ast::Var(f), Ast::Var(x)),
-            Ast::app(Ast::app(Ast::Var(f), Ast::Var(x)), Ast::Var(x)),
-          ),
-        ),
-      ),
-      Ast::Int(3005),
+    let b = AstBuilder::default();
+    let ast = b.app(
+      b.make_funs(|[x, f]| {
+        b.app(
+          b.app(b.var(f), b.var(x)),
+          b.apps(b.var(f), [b.var(x), b.var(x)]),
+        )
+      }),
+      b.int(3005),
     );
 
     let ir = simplify(ast);
@@ -547,13 +527,13 @@ mod tests {
   #[test]
   fn simple_once_nontrivial_expression_is_inlined() {
     let [x, y, f] = make_vars();
-    let ast = Ast::fun(
+    let b = AstBuilder::default();
+    let ast = b.fun(
       f,
-      Ast::app(
-        Ast::fun(x, Ast::app(Ast::Var(f), Ast::Var(x))),
-        Ast::fun(y, Ast::app(Ast::Var(y), Ast::Int(3005))),
-      ),
-    );
+      b.app(
+        b.fun(x, b.app(b.var(f), b.var(x))),
+        b.fun(y, b.app(b.var(y), b.int(3005))),
+      ));
 
     let ir = simplify(ast);
 
@@ -566,13 +546,14 @@ mod tests {
 
   #[test]
   fn simple_many_nontrivial_expression_is_not_inlined() {
+    let b = AstBuilder::default();
     let [x, y, f] = make_vars();
-    let ast = Ast::app(
-      Ast::fun(
+    let ast = b.app(
+      b.fun(
         x,
-        Ast::fun(f, Ast::app(Ast::app(Ast::Var(f), Ast::Var(x)), Ast::Var(x))),
+        b.fun(f, b.app(b.app(b.var(f), b.var(x)), b.var(x))),
       ),
-      Ast::fun(y, Ast::app(Ast::Var(y), Ast::Int(3005))),
+      b.fun(y, b.app(b.var(y), b.int(3005))),
     );
 
     let ir = simplify(ast);
@@ -588,10 +569,11 @@ mod tests {
 
   #[test]
   fn simple_onceinfun_uninteresting_context_is_not_inlined() {
+    let b = AstBuilder::default();
     let [x, y, f] = make_vars();
-    let ast = Ast::app(
-      Ast::fun(f, Ast::fun(x, Ast::Var(f))),
-      Ast::fun(y, Ast::app(Ast::Var(y), Ast::Int(3005))),
+    let ast = b.app(
+      b.funs([f, x], b.var(f)),
+      b.fun(y, b.app(b.var(y), b.int(3005))),
     );
 
     let ir = simplify(ast);
@@ -607,16 +589,14 @@ mod tests {
 
   #[test]
   fn simple_onceinfun_interesting_arg_is_inlined() {
+    let b = AstBuilder::default();
     let [x, y, w, f, g, h] = make_vars();
     // An interesting arg is any expression that isn't trivial.
     // We use a function for that purpose here.
-    let interesting_arg = Ast::fun(g, Ast::Var(g));
-    let ast = Ast::app(
-      Ast::fun(f, Ast::fun(x, Ast::app(Ast::Var(f), interesting_arg))),
-      Ast::fun(
-        y,
-        Ast::fun(w, Ast::app(Ast::Var(y), Ast::fun(h, Ast::Var(h)))),
-      ),
+    let interesting_arg = b.fun(g, b.var(g));
+    let ast = b.app(
+      b.funs([f, x], b.app(b.var(f), interesting_arg)),
+      b.funs([y, w], b.app(b.var(y), b.fun(h, b.var(h)))),
     );
 
     let ir = simplify(ast);
@@ -630,41 +610,42 @@ mod tests {
 
   #[test]
   fn simple_big_expr() {
+    let build = AstBuilder::default();
     let [a, b, c, d, e, f, g, h, i, j, k, l, m] = make_vars();
-    let ast = locals(
+    let ast = build.locals(
       [
         (
           a,
-          locals(
+          build.locals(
             [(
               b,
-              locals(
+              build.locals(
                 [(
                   c,
-                  locals([(d, locals([(e, Ast::Int(1))], Ast::Var(e)))], Ast::Var(d)),
+                  build.locals([(d, build.locals([(e, build.int(1))], build.var(e)))], build.var(d)),
                 )],
-                Ast::Var(c),
+                build.var(c),
               ),
             )],
-            Ast::Var(b),
+            build.var(b),
           ),
         ),
-        (i, Ast::Int(2)),
-        (g, Ast::Int(3)),
-        (h, Ast::Int(4)),
+        (i, build.int(2)),
+        (g, build.int(3)),
+        (h, build.int(4)),
         (
           f,
-          Ast::fun(j, Ast::fun(k, Ast::fun(l, Ast::fun(m, Ast::Var(j))))),
+          build.funs([j, k, l, m], build.var(j)),
         ),
       ],
-      Ast::app(
-        Ast::app(
-          Ast::app(Ast::app(Ast::Var(f), Ast::Var(a)), Ast::Var(i)),
-          Ast::Var(g),
-        ),
-        Ast::Var(h),
-      ),
-    );
+      build.apps(
+        build.var(f),
+        [ build.var(a)
+        , build.var(i)
+        , build.var(g)
+        , build.var(h)
+        ]
+      ));
 
     let ir = simplify(ast);
 

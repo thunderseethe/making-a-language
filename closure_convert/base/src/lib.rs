@@ -348,7 +348,7 @@ mod tests {
   use lowering_base::{self as ir, lower, Type};
   use monomorph_base::monomorph;
   use simplify_base::simplify;
-  use types_base::{self as ast, type_infer, Ast};
+  use types_base::{self as ast, type_infer, Ast, builder::{make_vars, AstBuilder}};
 
   fn trivial_monomorph(ir: ir::IR) -> ir::IR {
     let mut types = vec![];
@@ -369,60 +369,20 @@ mod tests {
     closure_convert(trivial_monomorph(simplify(ir)))
   }
 
-  fn locals(
-    binds: impl IntoIterator<Item = (ast::Var, Ast<ast::Var>)>,
-    body: Ast<ast::Var>,
-  ) -> Ast<ast::Var> {
-    binds
-      .into_iter()
-      .collect::<Vec<_>>()
-      .into_iter()
-      .rfold(body, |body, (var, defn)| {
-        Ast::app(Ast::fun(var, body), defn)
-      })
-  }
-
   #[test]
   fn closure_convert_test() {
-    let add = ast::Var(0);
-    let x = ast::Var(1);
-    let y = ast::Var(2);
-    let p = ast::Var(3);
-    let q = ast::Var(4);
-    let g = ast::Var(5);
-    let h = ast::Var(6);
-    let f = ast::Var(7);
-    let ast = Ast::fun(
-      add,
-      Ast::fun(
-        h,
-        locals(
-          [
-            (
-              f,
-              Ast::fun(
-                q,
-                Ast::fun(
-                  x,
-                  Ast::app(Ast::app(Ast::Var(add), Ast::Var(q)), Ast::Var(x)),
-                ),
-              ),
-            ),
-            (
-              g,
-              Ast::fun(
-                p,
-                Ast::fun(
-                  y,
-                  Ast::app(Ast::app(Ast::Var(add), Ast::Var(p)), Ast::Var(y)),
-                ),
-              ),
-            ),
-          ],
-          Ast::app(
-            Ast::app(Ast::Var(h), Ast::app(Ast::Var(f), Ast::Int(3))),
-            Ast::app(Ast::Var(g), Ast::Int(5)),
-          ),
+    let b = AstBuilder::default();
+    let [add, x, y, p, q, g, h, f] = make_vars();
+    let ast = b.funs(
+      [add, h],
+      b.locals(
+        [
+          (f, b.funs([q, x], b.apps(b.var(add), [b.var(q), b.var(x)]))),
+          (g, b.funs([p, y], b.apps(b.var(add), [b.var(p), b.var(y)]))),
+        ],
+        b.app(
+          b.app(b.var(h), b.app(b.var(f), b.int(3))),
+          b.app(b.var(g), b.int(5)),
         ),
       ),
     );
@@ -440,13 +400,13 @@ mod tests {
           func(V3:{ code: [i32 -> i32]
                   , env: {[i32 -> [i32 -> i32]]}
                   }, V2:i32) {
-            (let (V4 V3[0]) (apply (apply V4 3) V2))
+            (let (V4 V3[1]) (apply (apply V4 3) V2))
           }"#]],
       expect![[r#"
           func(V6:{ code: [i32 -> i32]
                   , env: {[i32 -> [i32 -> i32]]}
                   }, V5:i32) {
-            (let (V7 V6[0]) (apply (apply V7 5) V5))
+            (let (V7 V6[1]) (apply (apply V7 5) V5))
           }"#]],
     ];
     for ((_, defn), expect) in output.closure_items.into_iter().zip(closure_expects) {

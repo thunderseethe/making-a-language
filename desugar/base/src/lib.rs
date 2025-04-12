@@ -1,14 +1,16 @@
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::ops::Range;
 
-use parser_base::{Node, Syntax, Token};
-use syntree::{FlavorDefault, Tree};
-use types_base::Ast;
+use parser_base::rowan::{GreenNode, NodeOrToken, TextRange};
+use parser_base::{
+  Lang, Syntax, SyntaxNode,
+};
+use types_base::{Ast, NodeId};
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum ErrorKind {
-  MissingNode(Node),
-  MissingToken(Token),
+  MissingSyntax(Syntax),
   ProgramMissingExpr,
   ExpectedLetOrAppInExpr(Syntax),
   LetMissingBinding,
@@ -18,12 +20,14 @@ pub enum ErrorKind {
   FunMissingIdentifier,
   FunMissingExpr,
   EmptyApplication,
+  VarMissingIdentifier,
+  IntegerExprMissingInt,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesugarError {
-  kind: ErrorKind,
-  span: Range<usize>,
+  pub kind: ErrorKind,
+  pub span: Range<usize>,
 }
 
 impl DesugarError {
@@ -32,235 +36,236 @@ impl DesugarError {
   }
 }
 
-type ParseNode<'a> = syntree::Node<'a, Syntax, FlavorDefault>;
-
-struct Desugar<'a> {
-  source: &'a str,
+struct Desugar {
+  node_id: u32,
+  ast_to_cst: HashMap<NodeId, SyncNode>,
+  root: GreenNode,
 }
 
-impl<'a> Desugar<'a> {
-  fn new(source: &'a str) -> Self {
-    Self { source }
+impl Desugar {
+  fn new(root: GreenNode) -> Self {
+    Self {
+      node_id: 0,
+      ast_to_cst: HashMap::default(),
+      root,
+    }
   }
 
-  fn desugar_program(
-    &mut self,
-    cst: Tree<Syntax, FlavorDefault>,
-  ) -> Result<Ast<String>, DesugarError> {
-    let node = cst
-      .first()
-      .filter(|node| node.value() == Syntax::Node(Node::Program))
-      .ok_or(DesugarError::new(
-        ErrorKind::ProgramMissingExpr,
-        cst.range(),
-      ))?;
+  fn next_id(&mut self) -> NodeId {
+    let id = self.node_id;
+    self.node_id += 1;
+    NodeId(id)
+  }
 
-    let Some(expr) = node.first() else {
+  fn insert_node(&mut self, node_id: NodeId, span: TextRange) -> Option<SyncNode> {
+    self.ast_to_cst.insert(node_id, SyncNode { root: self.root.clone(), span })
+  }
+
+  fn desugar_program(&mut self, cst: SyntaxNode<Lang>) -> Result<Ast<String>, DesugarError> {
+    let Some(expr) = cst.first_child() else {
       return Err(DesugarError::new(
         ErrorKind::ProgramMissingExpr,
-        cst.range(),
+        cst.text_range().into(),
       ));
     };
 
     self.desugar_expr(expr)
   }
 
-  fn desugar_expr(&mut self, expr: ParseNode<'_>) -> Result<Ast<String>, DesugarError> {
-    if expr.value() != Syntax::Node(Node::Lets) {
+  fn desugar_expr(
+    &mut self,
+    expr: SyntaxNode<Lang>,
+  ) -> Result<Ast<String>, DesugarError> {
+    if expr.kind() != Syntax::Expr {
       return Err(DesugarError::new(
-        ErrorKind::MissingNode(Node::Lets),
-        expr.range(),
+        ErrorKind::MissingSyntax(Syntax::Expr),
+        expr.text_range().into(),
       ));
     }
 
     let mut binds = vec![];
     // The only tokens that appear in Lets are whitespace that we are happy to skip here.
-    for child in expr.children().skip_tokens() {
-      if child.value() == Syntax::Node(Node::Let) {
-        let binding = self.desugar_let(child)?;
-        binds.push(binding)
-      } else if child.value() == Syntax::Node(Node::App) {
-        let app = self.desugar_app_spine(child)?;
-        return Ok(
-          binds
-            .into_iter()
-            .rfold(app, |body, (var, arg)| Ast::app(Ast::fun(var, body), arg)),
-        );
-      } else {
-        return Err(DesugarError::new(
-          ErrorKind::ExpectedLetOrAppInExpr(child.value()),
-          child.range(),
-        ));
+    for child in expr.children() {
+      match child.kind() {
+        Syntax::Let => {
+          let (var, arg) = self.desugar_let(child.clone())?;
+          binds.push((var, arg, child))
+        },
+        Syntax::App => {
+          let app = self.desugar_app_spine(child)?;
+          return Ok(binds.into_iter().rfold(app, |body, (var, arg, child)| {
+            let app_id = self.next_id();
+            let fun_id = self.next_id();
+            self.insert_node(app_id, child.text_range());
+            self.insert_node(fun_id, child.text_range());
+            Ast::app(app_id, Ast::fun(fun_id, var, body), arg)
+          }));
+        },
+        _ => {
+          return Err(DesugarError::new(
+            ErrorKind::ExpectedLetOrAppInExpr(child.kind()),
+            child.text_range().into(),
+          ));
+        }
       }
     }
 
     Err(DesugarError::new(
-      ErrorKind::MissingNode(Node::App),
-      expr.last().unwrap_or(expr).range(),
+      ErrorKind::MissingSyntax(Syntax::App),
+      expr
+        .last_child_or_token()
+        .unwrap_or(NodeOrToken::Node(expr))
+        .text_range()
+        .into(),
     ))
   }
 
-  fn desugar_let(&mut self, bind: ParseNode<'_>) -> Result<(String, Ast<String>), DesugarError> {
+  fn desugar_let(
+    &mut self,
+    bind: SyntaxNode<Lang>,
+  ) -> Result<(String, Ast<String>), DesugarError> {
     let mut children = bind.children();
 
-    expect_token(&mut children, Token::LetKw)?;
-
-    let Some(var) =
-      skip_whitespace(&mut children).filter(|id| id.value() == Syntax::Token(Token::Identifier))
-    else {
+    let Some(var) = children.next() else {
       return Err(DesugarError::new(
         ErrorKind::LetMissingBinding,
-        bind.range(),
+        bind.text_range().into(),
       ));
     };
 
-    expect_token(&mut children, Token::Equal)?;
+    let Some(binder) = (var.kind() == Syntax::LetBinder)
+      .then_some(())
+      .and_then(|_| var.first_child_or_token_by_kind(&|kind| kind == Syntax::Identifier))
+    else {
+      return Err(DesugarError::new(
+        ErrorKind::LetMissingBinding,
+        var.text_range().into(),
+      ));
+    };
 
-    let Some(expr) = skip_whitespace(&mut children) else {
-      return Err(DesugarError::new(ErrorKind::LetMissingExpr, bind.range()));
+    let id = binder.to_string();
+
+    let Some(expr) = children.next() else {
+      return Err(DesugarError::new(
+        ErrorKind::LetMissingExpr,
+        bind.text_range().into()
+      ));
     };
 
     let ast = self.desugar_expr(expr)?;
 
-    expect_token(&mut children, Token::Semicolon)?;
-
-    // Skip any trailing whitespace
-    skip_whitespace(&mut children);
-
-    let extra = children.map(|node| node.value()).collect::<Vec<_>>();
+    let extra = children.map(|node| node.kind()).collect::<Vec<_>>();
     if !extra.is_empty() {
       return Err(DesugarError::new(
         ErrorKind::Unexpected(extra),
-        bind.range(),
+        bind.text_range().into(),
       ));
     }
 
-    Ok((self.source[var.range()].to_string(), ast))
+    Ok((id, ast))
+  }
+  
+  fn desugar_fun(&mut self, fun: SyntaxNode<Lang>) -> Result<Ast<String>, DesugarError> {
+    let Some(var) = fun.first_child_by_kind(&|kind| kind == Syntax::FunBinder) else {
+      return Err(DesugarError::new(
+        ErrorKind::FunMissingIdentifier,
+        fun.first_child_or_token().map(|n| n.text_range()).unwrap_or(fun.text_range()).into()
+      ));
+    };
+
+    let Some(expr) = fun.first_child_by_kind(&|kind| kind == Syntax::Expr) else {
+      return Err(DesugarError::new(
+        ErrorKind::FunMissingIdentifier,
+        fun.last_child_or_token().map(|n| n.text_range()).unwrap_or(fun.text_range()).into()
+      ));
+    };
+
+    let body = self.desugar_expr(expr)?;
+
+    let id = self.next_id();
+    Ok(Ast::fun(id, var.to_string(), body))
   }
 
-  fn desugar_app_spine(&mut self, app: ParseNode<'_>) -> Result<Ast<String>, DesugarError> {
-    let mut children = app.children();
-
+  fn desugar_app_spine(&mut self, app: SyntaxNode<Lang>) -> Result<Ast<String>, DesugarError> {
     let mut spine = vec![];
-    while let Some(atom) = skip_whitespace(&mut children) {
-      let expr = match atom.value() {
-        Syntax::Node(Node::Fun) => self.desugar_fun(atom)?,
-        Syntax::Node(Node::ParenthesizedExpr) => self.desugar_paren_expr(atom)?,
-        Syntax::Node(Node::Var) => {
+
+    for atom in app.children() {
+      let expr = match atom.kind() {
+        Syntax::Fun => self.desugar_fun(atom)?,
+        Syntax::ParenthesizedExpr => {
+          atom.first_child_by_kind(&|kind| kind == Syntax::Expr)
+              .ok_or(DesugarError::new(
+                ErrorKind::MissingSyntax(Syntax::Expr),
+                atom.text_range().into()
+              ))
+              .and_then(|expr| self.desugar_expr(expr))?
+        },
+        Syntax::Var => {
           let var = atom
-            .first()
-            .filter(|tok| tok.value() == Syntax::Token(Token::Identifier))
-            .expect("Var parse node should always be constructed with identifier as it's child");
-          Ast::Var(self.source[var.range()].to_string())
-        }
-        Syntax::Token(Token::Int) => self.source[atom.range()]
-          .parse()
-          .map(Ast::Int)
-          .map_err(|err| DesugarError::new(ErrorKind::InvalidInt(err), atom.range()))?,
-        _ => {
-          let mut extra = vec![atom.value()];
-          extra.extend(children.map(|tok| tok.value()));
-          return Err(DesugarError::new(ErrorKind::Unexpected(extra), app.range()));
-        }
+            .first_child_or_token_by_kind(&|kind| kind == Syntax::Identifier)
+            .ok_or(DesugarError::new(
+              ErrorKind::VarMissingIdentifier,
+              atom.text_range().into()
+            ))?;
+          let id = self.next_id();
+          self.insert_node(id, atom.text_range());
+          Ast::Var(id, var.to_string())
+        },
+        Syntax::IntegerExpr => {
+          let int = atom
+              .first_child_or_token_by_kind(&|kind| kind == Syntax::Int)
+              .ok_or(DesugarError::new(
+                ErrorKind::IntegerExprMissingInt,
+                atom.text_range().into()
+              ))?;
+          let id = self.next_id();
+          let val = int.to_string().parse().map_err(|err| DesugarError::new(
+            ErrorKind::InvalidInt(err),
+            int.text_range().into()
+          ))?;
+          self.insert_node(id, atom.text_range());
+          Ast::Int(id, val)
+        },
+        _ => return Err(DesugarError::new(ErrorKind::Unexpected(vec![atom.kind()]), atom.text_range().into())),
       };
       spine.push(expr);
     }
-
+    
     spine
       .into_iter()
-      .reduce(Ast::app)
-      .ok_or(DesugarError::new(ErrorKind::EmptyApplication, app.range()))
-  }
-
-  fn desugar_fun(&mut self, expr: ParseNode<'_>) -> Result<Ast<String>, DesugarError> {
-    let mut children = expr.children();
-    expect_token(&mut children, Token::Backslash)?;
-
-    let Some(var) =
-      skip_whitespace(&mut children).filter(|tok| tok.value() == Syntax::Token(Token::Identifier))
-    else {
-      return Err(DesugarError::new(
-        ErrorKind::FunMissingIdentifier,
-        expr.range(),
-      ));
-    };
-
-    expect_token(&mut children, Token::Arrow)?;
-
-    let Some(body) = skip_whitespace(&mut children) else {
-      return Err(DesugarError::new(ErrorKind::FunMissingExpr, expr.range()));
-    };
-
-    let body = self.desugar_expr(body)?;
-
-    Ok(Ast::fun(self.source[var.range()].to_string(), body))
-  }
-
-  fn desugar_paren_expr(&mut self, expr: ParseNode<'_>) -> Result<Ast<String>, DesugarError> {
-    let mut children = expr.children();
-    expect_token(&mut children, Token::LeftParen)?;
-
-    let Some(expr) = skip_whitespace(&mut children) else {
-      return Err(DesugarError::new(
-        ErrorKind::MissingNode(Node::Lets),
-        expr.range(),
-      ));
-    };
-    let expr = self.desugar_expr(expr)?;
-
-    expect_token(&mut children, Token::RightParen)?;
-    Ok(expr)
+      .reduce(|a, b| {
+        let id = self.next_id();
+        self.insert_node(id, app.text_range());
+        Ast::app(id, a, b)
+      })
+      .ok_or(DesugarError::new(ErrorKind::EmptyApplication, app.text_range().into()))
   }
 }
 
-fn expect_token(
-  children: &mut syntree::node::Children<'_, Syntax, FlavorDefault>,
-  token: Token,
-) -> Result<(), DesugarError> {
-  // TODO: Figure out how to give this a meaningful span.
-  let tok =
-    skip_whitespace(children).ok_or(DesugarError::new(ErrorKind::MissingToken(token), 0..1))?;
-
-  if tok.value() == Syntax::Token(token) {
-    Ok(())
-  } else {
-    Err(DesugarError::new(
-      ErrorKind::MissingToken(token),
-      tok.range(),
-    ))
-  }
-}
-
-fn skip_whitespace<'a>(
-  children: &mut impl Iterator<Item = syntree::Node<'a, Syntax, FlavorDefault>>,
-) -> Option<syntree::Node<'a, Syntax, FlavorDefault>> {
-  let possibly_whitespace = children.next()?;
-  if possibly_whitespace.value() == Syntax::Token(Token::Whitespaces) {
-    return children.next();
-  }
-  Some(possibly_whitespace)
+#[derive(Debug, Hash, PartialEq, Eq, Clone)]
+pub struct SyncNode {
+  pub root: GreenNode,
+  pub span: TextRange
 }
 
 // TODO: Combine content and tree into one output of parsing.
 // Possibly with an API
 pub fn desugar(
-  source: &str,
-  cst: Tree<Syntax, FlavorDefault>,
-) -> Result<Ast<String>, DesugarError> {
-  Desugar::new(source).desugar_program(cst)
+  root: GreenNode,
+) -> Result<(Ast<String>, HashMap<NodeId, SyncNode>), DesugarError> {
+  let mut desugar = Desugar::new(root.clone());
+  let ast = desugar.desugar_program(SyntaxNode::new_root(root))?;
+  Ok((ast, desugar.ast_to_cst))
 }
 
 #[cfg(test)]
 mod tests {
-
   use super::*;
+  use types_base::builder::AstBuilder;
 
   fn desugar(input: &str) -> Result<Ast<String>, DesugarError> {
-    let cst = parser_base::parse(input);
-    let mut o = vec![];
-    syntree::print::print_with_source(&mut o, &cst, input).unwrap();
-    println!("{}", String::from_utf8(o).unwrap());
-    crate::desugar(input, cst)
+    let (cst, _) = parser_base::parse(input);
+    crate::desugar(cst).map(|(ast, _)| ast)
   }
 
   #[test]
@@ -285,30 +290,30 @@ y (
       }
     };
 
+    // It just so happens our AstBuilder assigns IDs the same way as our desugar pass, so this
+    // works.
+    let b = AstBuilder::default();
     assert_eq!(
       ast,
-      Ast::app(
-        Ast::fun(
-          "x".to_string(),
-          Ast::app(
-            Ast::fun(
-              "y".to_string(),
-              Ast::app(
-                Ast::app(
-                  Ast::Var("y".to_string()),
-                  Ast::fun("c".to_string(), Ast::Var("c".to_string()))
-                ),
-                Ast::Int(4)
-              )
-            ),
-            Ast::fun(
+      b.locals(
+        [
+          (
+            "x".to_string(),
+            b.fun("a".to_string(), b.var("a".to_string()))
+          ),
+          (
+            "y".to_string(),
+            b.fun(
               "b".to_string(),
-              Ast::app(Ast::Var("x".to_string()), Ast::Var("b".to_string()))
+              b.app(b.var("x".to_string()), b.var("b".to_string()))
             )
           )
-        ),
-        Ast::fun("a".to_string(), Ast::Var("a".to_string()))
-      )
+        ],
+        b.apps(
+          b.var("y".to_string()),
+          [b.fun("c".to_string(), b.var("c".to_string())), b.int(4)]
+        )
+      ),
     );
   }
 }

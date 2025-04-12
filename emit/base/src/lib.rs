@@ -560,7 +560,7 @@ mod tests {
   use lowering_base::{self as ir, lower, IR};
   use monomorph_base::monomorph;
   use simplify_base::simplify;
-  use types_base::{self as ast, ast as builder, type_infer, Ast};
+  use types_base::{self as ast, builder::{make_vars, AstBuilder}, type_infer, Ast};
   use wasmparser::{Validator, WasmFeatures};
   use wasmprinter::PrintFmtWrite;
   use wasmtime::{Config, Engine, Linker, Module, Store};
@@ -598,25 +598,26 @@ mod tests {
 
   #[test]
   fn test_closure_conversion() {
-    let [add, x, y, p, q, g, h, f] = builder::make_vars();
-    let ast = Ast::funs(
+    let b = AstBuilder::default();
+    let [add, x, y, p, q, g, h, f] = make_vars();
+    let ast = b.funs(
       [add, h],
-      Ast::locals(
+      b.locals(
         [
           (
             f,
-            Ast::funs([q, x], Ast::apps(Ast::Var(add), [Ast::Var(q), Ast::Var(x)])),
+            b.funs([q, x], b.apps(b.var(add), [b.var(q), b.var(x)])),
           ),
           (
             g,
-            Ast::funs([p, y], Ast::apps(Ast::Var(add), [Ast::Var(p), Ast::Var(y)])),
+            b.funs([p, y], b.apps(b.var(add), [b.var(p), b.var(y)])),
           ),
         ],
-        Ast::apps(
-          Ast::Var(h),
+        b.apps(
+          b.var(h),
           [
-            Ast::app(Ast::Var(f), Ast::Int(3)),
-            Ast::app(Ast::Var(g), Ast::Int(5)),
+            b.app(b.var(f), b.int(3)),
+            b.app(b.var(g), b.int(5)),
           ],
         ),
       ),
@@ -729,25 +730,26 @@ mod tests {
 
   #[test]
   fn test_wasm_execution() {
-    let [add, x, y, f, g, a, b] = builder::make_vars();
-    let ast = Ast::funs(
+    let b = AstBuilder::default();
+    let [add, x, y, f, g, h, j] = make_vars();
+    let ast = b.funs(
       [add, x, y],
-      Ast::locals(
+      b.locals(
         [
           (
             f,
-            Ast::fun(a, Ast::apps(Ast::Var(add), [Ast::Var(a), Ast::Var(y)])),
+            b.fun(h, b.apps(b.var(add), [b.var(h), b.var(y)])),
           ),
           (
             g,
-            Ast::fun(b, Ast::apps(Ast::Var(add), [Ast::Var(x), Ast::Var(b)])),
+            b.fun(j, b.apps(b.var(add), [b.var(x), b.var(j)])),
           ),
         ],
-        Ast::apps(
-          Ast::Var(add),
+        b.apps(
+          b.var(add),
           [
-            Ast::app(Ast::Var(f), Ast::Int(3)),
-            Ast::app(Ast::Var(g), Ast::Int(5)),
+            b.app(b.var(f), b.int(3)),
+            b.app(b.var(g), b.int(5)),
           ],
         ),
       ),

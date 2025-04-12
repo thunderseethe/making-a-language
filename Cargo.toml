@@ -3,15 +3,6 @@ name = "making-a-language"
 version = "0.1.0"
 edition = "2021"
 
-[lib]
-name = "lib"
-path = "src/lib.rs"
-crate-type = ["cdylib"]
-
-[[bin]]
-name = "making-a-language"
-path = "src/main.rs"
-
 [workspace]
 members = [
   "types/base",
@@ -25,7 +16,9 @@ members = [
   "closure_convert/base", 
   "emit/base", 
   "parser/base", 
-  "desugar/base", "name_resolution/base",
+  "desugar/base",
+  "name_resolution/base", 
+  "compiler/base",
 ]
 
 [workspace.dependencies]
@@ -41,6 +34,7 @@ emit-base = { path = "emit/base" }
 parser-base = { path = "parser/base" }
 desugar-base = { path = "desugar/base" }
 name-resolution-base = { path = "name_resolution/base" }
+compiler-base = { path = "compiler/base" }
 
 ena = "0.14.2"
 expect-test = "1.5.1"
