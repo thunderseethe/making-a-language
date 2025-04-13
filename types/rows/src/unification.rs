@@ -1,11 +1,18 @@
+use crate::ast::NodeId;
 use crate::ty::{ClosedRow, Row, RowCombination, RowVar, Type, TypeVar};
 use crate::{Constraint, TypeInference};
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum TypeError {
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub enum TypeErrorKind {
   TypeNotEqual((Type, Type)),
   InfiniteType(TypeVar, Type),
   RowsNotEqual((ClosedRow, ClosedRow)),
+}
+
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub struct TypeError {
+  pub kind: TypeErrorKind,
+  pub node_id: NodeId,
 }
 
 /// Constraint solving
@@ -13,8 +20,8 @@ impl TypeInference {
   pub(crate) fn unification(&mut self, constraints: Vec<Constraint>) -> Result<(), TypeError> {
     for constr in constraints {
       match constr {
-        Constraint::TypeEqual(left, right) => self.unify_ty_ty(left, right)?,
-        Constraint::RowCombine(row_comb) => self.unify_row_comb(row_comb)?,
+        Constraint::TypeEqual(node_id, left, right) => self.unify_ty_ty(left, right).map_err(|kind| TypeError { kind, node_id })?,
+        Constraint::RowCombine(node_id, row_comb) => self.unify_row_comb(row_comb).map_err(|kind| TypeError { kind, node_id })?,
       }
     }
     Ok(())
@@ -41,7 +48,7 @@ impl TypeInference {
     }
   }
 
-  fn dispatch_any_solved(&mut self, var: RowVar, row: ClosedRow) -> Result<(), TypeError> {
+  fn dispatch_any_solved(&mut self, var: RowVar, row: ClosedRow) -> Result<(), TypeErrorKind> {
     let mut changed_combs = vec![];
     self.partial_row_combs = std::mem::take(&mut self.partial_row_combs)
       .into_iter()
@@ -101,7 +108,7 @@ impl TypeInference {
     }
   }
 
-  fn unify_ty_ty(&mut self, unnorm_left: Type, unnorm_right: Type) -> Result<(), TypeError> {
+  fn unify_ty_ty(&mut self, unnorm_left: Type, unnorm_right: Type) -> Result<(), TypeErrorKind> {
     let left = self.normalize_ty(unnorm_left);
     let right = self.normalize_ty(unnorm_right);
     match (left, right) {
@@ -113,14 +120,14 @@ impl TypeInference {
       (Type::Var(a), Type::Var(b)) => self
         .unification_table
         .unify_var_var(a, b)
-        .map_err(TypeError::TypeNotEqual),
+        .map_err(TypeErrorKind::TypeNotEqual),
       (Type::Var(v), ty) | (ty, Type::Var(v)) => {
         ty.occurs_check(v)
-          .map_err(|ty| TypeError::InfiniteType(v, ty))?;
+          .map_err(|ty| TypeErrorKind::InfiniteType(v, ty))?;
         self
           .unification_table
           .unify_var_value(v, Some(ty))
-          .map_err(TypeError::TypeNotEqual)
+          .map_err(TypeErrorKind::TypeNotEqual)
       }
       (Type::Prod(left), Type::Prod(right)) | (Type::Sum(left), Type::Sum(right)) => {
         self.unify_row_row(left, right)
@@ -135,13 +142,13 @@ impl TypeInference {
         }),
         row,
       ),
-      (left, right) => Err(TypeError::TypeNotEqual((left, right))),
+      (left, right) => Err(TypeErrorKind::TypeNotEqual((left, right))),
     }
   }
 
   /// Calculate the set difference of the goal row and the sub row, returning it as a new row.
   /// Unify the subset of the goal row that matches the sub row
-  fn diff_and_unify(&mut self, goal: ClosedRow, sub: ClosedRow) -> Result<ClosedRow, TypeError> {
+  fn diff_and_unify(&mut self, goal: ClosedRow, sub: ClosedRow) -> Result<ClosedRow, TypeErrorKind> {
     let mut diff_fields = vec![];
     let mut diff_values = vec![];
     for (field, value) in goal.fields.into_iter().zip(goal.values.into_iter()) {
@@ -161,25 +168,25 @@ impl TypeInference {
     })
   }
 
-  fn unify_row_row(&mut self, left: Row, right: Row) -> Result<(), TypeError> {
+  fn unify_row_row(&mut self, left: Row, right: Row) -> Result<(), TypeErrorKind> {
     let left = self.normalize_row(left);
     let right = self.normalize_row(right);
     match (left, right) {
       (Row::Open(left), Row::Open(right)) => self
         .row_unification_table
         .unify_var_var(left, right)
-        .map_err(TypeError::RowsNotEqual),
+        .map_err(TypeErrorKind::RowsNotEqual),
       (Row::Open(var), Row::Closed(row)) | (Row::Closed(row), Row::Open(var)) => {
         self
           .row_unification_table
           .unify_var_value(var, Some(row.clone()))
-          .map_err(TypeError::RowsNotEqual)?;
+          .map_err(TypeErrorKind::RowsNotEqual)?;
         self.dispatch_any_solved(var, row)
       }
       (Row::Closed(left), Row::Closed(right)) => {
         // Check that our rows are unifiable
         if left.fields != right.fields {
-          return Err(TypeError::RowsNotEqual((left, right)));
+          return Err(TypeErrorKind::RowsNotEqual((left, right)));
         }
 
         // If they are, our values are already in order so we can walk them and unify the
@@ -192,7 +199,7 @@ impl TypeInference {
     }
   }
 
-  fn unify_row_comb(&mut self, row_comb: RowCombination) -> Result<(), TypeError> {
+  fn unify_row_comb(&mut self, row_comb: RowCombination) -> Result<(), TypeErrorKind> {
     let left = self.normalize_row(row_comb.left);
     let right = self.normalize_row(row_comb.right);
     let goal = self.normalize_row(row_comb.goal);

@@ -3,49 +3,33 @@ use std::collections::BTreeSet;
 
 use ena::unify::{EqUnifyValue, InPlaceUnificationTable, UnifyKey};
 
-/// Extra utility methods for working with our AST. These are used to make constructing ASTs in
-/// tests easier.
-pub mod builder;
-
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 pub struct Var(pub usize);
 
 #[derive(PartialEq, Eq, Clone, Debug)]
 pub struct TypedVar(pub Var, pub Type);
 
-#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Copy, Hash)]
-pub struct NodeId(pub u32);
-
 /// Our Abstract syntax tree
 /// The lambda calculus + integer literals.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Ast<V> {
   /// A local variable
-  Var(NodeId, V),
+  Var(V),
   /// An integer literal
-  Int(NodeId, isize),
+  Int(isize),
   /// A function literal (lambda, closure).
-  Fun(NodeId, V, Box<Ast<V>>),
+  Fun(V, Box<Ast<V>>),
   /// Function application
-  App(NodeId, Box<Ast<V>>, Box<Ast<V>>),
+  App(Box<Ast<V>>, Box<Ast<V>>),
 }
 
 impl<V> Ast<V> {
-  fn id(&self) -> NodeId {
-    match self {
-      Ast::Var(node_id, _)
-      | Ast::Int(node_id, _)
-      | Ast::Fun(node_id, _, _)
-      | Ast::App(node_id, _, _) => *node_id,
-    }
+  pub fn fun(arg: V, body: Self) -> Self {
+    Self::Fun(arg, Box::new(body))
   }
 
-  pub fn fun(node_id: NodeId, arg: V, body: Self) -> Self {
-    Self::Fun(node_id, arg, Box::new(body))
-  }
-
-  pub fn app(node_id: NodeId, fun: Self, arg: Self) -> Self {
-    Self::App(node_id, Box::new(fun), Box::new(arg))
+  pub fn app(fun: Self, arg: Self) -> Self {
+    Self::App(Box::new(fun), Box::new(arg))
   }
 }
 
@@ -107,7 +91,7 @@ impl UnifyKey for TypeVar {
 /// Right now this is just type equality but it will be more substantial later
 #[derive(Debug)]
 enum Constraint {
-  TypeEqual(NodeId, Type, Type),
+  TypeEqual(Type, Type),
 }
 
 /// Type inference
@@ -143,27 +127,27 @@ impl TypeInference {
   /// constraints hold.
   fn infer(&mut self, env: im::HashMap<Var, Type>, ast: Ast<Var>) -> (GenOut, Type) {
     match ast {
-      Ast::Int(id, i) => (GenOut::new(vec![], Ast::Int(id, i)), Type::Int),
-      Ast::Var(id, v) => {
+      Ast::Int(i) => (GenOut::new(vec![], Ast::Int(i)), Type::Int),
+      Ast::Var(v) => {
         let ty = &env[&v];
         (
-          GenOut::new(vec![], Ast::Var(id, TypedVar(v, ty.clone()))),
+          GenOut::new(vec![], Ast::Var(TypedVar(v, ty.clone()))),
           ty.clone(),
         )
       }
-      Ast::Fun(id, arg, body) => {
+      Ast::Fun(arg, body) => {
         let arg_ty_var = self.fresh_ty_var();
         let env = env.update(arg, Type::Var(arg_ty_var));
         let (body_out, body_ty) = self.infer(env, *body);
         (
           GenOut {
-            typed_ast: Ast::fun(id, TypedVar(arg, Type::Var(arg_ty_var)), body_out.typed_ast),
+            typed_ast: Ast::fun(TypedVar(arg, Type::Var(arg_ty_var)), body_out.typed_ast),
             ..body_out
           },
           Type::fun(Type::Var(arg_ty_var), body_ty),
         )
       }
-      Ast::App(id, fun, arg) => {
+      Ast::App(fun, arg) => {
         let (arg_out, arg_ty) = self.infer(env.clone(), *arg);
 
         let ret_ty = Type::Var(self.fresh_ty_var());
@@ -178,7 +162,7 @@ impl TypeInference {
               .into_iter()
               .chain(fun_out.constraints)
               .collect(),
-            Ast::app(id, fun_out.typed_ast, arg_out.typed_ast),
+            Ast::app(fun_out.typed_ast, arg_out.typed_ast),
           ),
           ret_ty,
         )
@@ -188,37 +172,30 @@ impl TypeInference {
 
   fn check(&mut self, env: im::HashMap<Var, Type>, ast: Ast<Var>, ty: Type) -> GenOut {
     match (ast, ty) {
-      (Ast::Int(id, i), Type::Int) => GenOut::new(vec![], Ast::Int(id, i)),
-      (Ast::Fun(id, arg, body), Type::Fun(arg_ty, ret_ty)) => {
+      (Ast::Int(i), Type::Int) => GenOut::new(vec![], Ast::Int(i)),
+      (Ast::Fun(arg, body), Type::Fun(arg_ty, ret_ty)) => {
         let env = env.update(arg, *arg_ty.clone());
         let body_out = self.check(env, *body, *ret_ty);
         GenOut {
-          typed_ast: Ast::fun(id, TypedVar(arg, *arg_ty), body_out.typed_ast),
+          typed_ast: Ast::fun(TypedVar(arg, *arg_ty), body_out.typed_ast),
           ..body_out
         }
       }
       (ast, expected_ty) => {
-        let id = ast.id();
         let (mut out, actual_ty) = self.infer(env, ast);
         out
           .constraints
-          .push(Constraint::TypeEqual(id, expected_ty, actual_ty));
+          .push(Constraint::TypeEqual(expected_ty, actual_ty));
         out
       }
     }
   }
 }
 
-#[derive(Debug, PartialEq, Eq, Clone)]
-pub enum TypeErrorKind {
+#[derive(Debug, PartialEq, Eq)]
+pub enum TypeError {
   TypeNotEqual(Type, Type),
   InfiniteType(TypeVar, Type),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeError {
-  pub kind: TypeErrorKind,
-  pub node_id: NodeId,
 }
 
 fn occurs_check(var: TypeVar, ty: Type) -> Result<(), Type> {
@@ -243,9 +220,7 @@ impl TypeInference {
   fn unification(&mut self, constraints: Vec<Constraint>) -> Result<(), TypeError> {
     for constr in constraints {
       match constr {
-        Constraint::TypeEqual(node_id, left, right) => self
-          .unify_ty_ty(left, right)
-          .map_err(|kind| TypeError { kind, node_id })?,
+        Constraint::TypeEqual(left, right) => self.unify_ty_ty(left, right)?,
       }
     }
     Ok(())
@@ -266,7 +241,7 @@ impl TypeInference {
     }
   }
 
-  fn unify_ty_ty(&mut self, unnorm_left: Type, unnorm_right: Type) -> Result<(), TypeErrorKind> {
+  fn unify_ty_ty(&mut self, unnorm_left: Type, unnorm_right: Type) -> Result<(), TypeError> {
     let left = self.normalize_ty(unnorm_left);
     let right = self.normalize_ty(unnorm_right);
     match (left, right) {
@@ -278,16 +253,16 @@ impl TypeInference {
       (Type::Var(a), Type::Var(b)) => self
         .unification_table
         .unify_var_var(a, b)
-        .map_err(|(l, r)| TypeErrorKind::TypeNotEqual(l, r)),
+        .map_err(|(l, r)| TypeError::TypeNotEqual(l, r)),
       (Type::Var(v), ty) | (ty, Type::Var(v)) => {
         ty.occurs_check(v)
-          .map_err(|ty| TypeErrorKind::InfiniteType(v, ty))?;
+          .map_err(|ty| TypeError::InfiniteType(v, ty))?;
         self
           .unification_table
           .unify_var_value(v, Some(ty))
-          .map_err(|(l, r)| TypeErrorKind::TypeNotEqual(l, r))
+          .map_err(|(l, r)| TypeError::TypeNotEqual(l, r))
       }
-      (left, right) => Err(TypeErrorKind::TypeNotEqual(left, right)),
+      (left, right) => Err(TypeError::TypeNotEqual(left, right)),
     }
   }
 }
@@ -318,25 +293,25 @@ impl TypeInference {
 
   fn substitute_ast(&mut self, ast: Ast<TypedVar>) -> (BTreeSet<TypeVar>, Ast<TypedVar>) {
     match ast {
-      Ast::Var(id, v) => {
+      Ast::Var(v) => {
         let (unbound, ty) = self.substitute(v.1);
-        (unbound, Ast::Var(id, TypedVar(v.0, ty)))
+        (unbound, Ast::Var(TypedVar(v.0, ty)))
       }
-      Ast::Int(id, i) => (BTreeSet::new(), Ast::Int(id, i)),
-      Ast::Fun(id, arg, body) => {
+      Ast::Int(i) => (BTreeSet::new(), Ast::Int(i)),
+      Ast::Fun(arg, body) => {
         let (mut unbound, ty) = self.substitute(arg.1);
         let arg = TypedVar(arg.0, ty);
 
         let (unbound_body, body) = self.substitute_ast(*body);
         unbound.extend(unbound_body);
 
-        (unbound, Ast::fun(id, arg, body))
+        (unbound, Ast::fun(arg, body))
       }
-      Ast::App(id, fun, arg) => {
+      Ast::App(fun, arg) => {
         let (mut unbound_fun, fun) = self.substitute_ast(*fun);
         let (unbound_arg, arg) = self.substitute_ast(*arg);
         unbound_fun.extend(unbound_arg);
-        (unbound_fun, Ast::app(id, fun, arg))
+        (unbound_fun, Ast::app(fun, arg))
       }
     }
   }
@@ -374,42 +349,36 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-  use self::builder::AstBuilder;
 
   use super::*;
 
   macro_rules! set {
-    ($($ele:expr),*) => {{
-        let mut tmp = BTreeSet::new();
-        $(tmp.insert($ele);)*
-        tmp
-    }};
-  }
+        ($($ele:expr),*) => {{
+            let mut tmp = BTreeSet::new();
+            $(tmp.insert($ele);)*
+            tmp
+        }};
+    }
 
   #[test]
   fn infers_int() {
-    let b = AstBuilder::default();
-    let ast = b.int(3);
+    let ast = Ast::Int(3);
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
-    assert_eq!(ty_chk.0, Ast::Int(NodeId(0), 3));
+    assert_eq!(ty_chk.0, Ast::Int(3));
     assert_eq!(ty_chk.1.ty, Type::Int);
   }
 
   #[test]
   fn infers_id_fun() {
     let x = Var(0);
-    let b = AstBuilder::default();
-    let ast = b.fun(x, b.var(x));
+    let ast = Ast::fun(x, Ast::Var(x));
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
 
     let a = TypeVar(0);
     let typed_x = TypedVar(x, Type::Var(a));
-    assert_eq!(
-      ty_chk.0,
-      Ast::fun(NodeId(1), typed_x.clone(), Ast::Var(NodeId(0), typed_x))
-    );
+    assert_eq!(ty_chk.0, Ast::fun(typed_x.clone(), Ast::Var(typed_x)));
     assert_eq!(
       ty_chk.1,
       TypeScheme {
@@ -423,8 +392,7 @@ mod tests {
   fn infers_k_combinator() {
     let x = Var(0);
     let y = Var(1);
-    let b = AstBuilder::default();
-    let ast = b.funs([x, y], b.var(x));
+    let ast = Ast::fun(x, Ast::fun(y, Ast::Var(x)));
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
 
@@ -444,10 +412,18 @@ mod tests {
     let x = Var(0);
     let y = Var(1);
     let z = Var(2);
-    let b = AstBuilder::default();
-    let ast = b.funs(
-      [x, y, z],
-      b.app(b.app(b.var(x), b.var(z)), b.app(b.var(y), b.var(z))),
+    let ast = Ast::fun(
+      x,
+      Ast::fun(
+        y,
+        Ast::fun(
+          z,
+          Ast::app(
+            Ast::app(Ast::Var(x), Ast::Var(z)),
+            Ast::app(Ast::Var(y), Ast::Var(z)),
+          ),
+        ),
+      ),
     );
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
@@ -469,17 +445,19 @@ mod tests {
   #[test]
   fn type_infer_fails() {
     let x = Var(0);
-    let b = AstBuilder::default();
-    let ast = b.locals([(x, b.int(1))], b.app(b.var(x), b.int(3)));
+    let ast = Ast::app(
+      Ast::fun(x, Ast::app(Ast::Var(x), Ast::Int(3))),
+      Ast::Int(1),
+    );
 
     let ty_chk_res = type_infer(ast);
 
     assert_eq!(
       ty_chk_res,
-      Err(TypeError {
-        kind: TypeErrorKind::TypeNotEqual(Type::fun(Type::Int, Type::Var(TypeVar(1))), Type::Int),
-        node_id: NodeId(1)
-      })
+      Err(TypeError::TypeNotEqual(
+        Type::fun(Type::Int, Type::Var(TypeVar(1))),
+        Type::Int
+      ))
     );
   }
 }

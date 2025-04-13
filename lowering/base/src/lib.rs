@@ -241,18 +241,18 @@ struct LowerAst {
 impl LowerAst {
   fn lower_ast(&mut self, ast: Ast<TypedVar>) -> IR {
     match ast {
-      Ast::Var(TypedVar(var, ty)) => IR::Var(Var::new(
+      Ast::Var(_, TypedVar(var, ty)) => IR::Var(Var::new(
         self.supply.supply_for(var),
         self.types.lower_ty(ty),
       )),
-      Ast::Int(i) => IR::Int(i),
-      Ast::Fun(TypedVar(var, ty), body) => {
+      Ast::Int(_, i) => IR::Int(i),
+      Ast::Fun(_, TypedVar(var, ty), body) => {
         let ir_ty = self.types.lower_ty(ty);
         let ir_var = self.supply.supply_for(var);
         let ir_body = self.lower_ast(*body);
         IR::fun(Var::new(ir_var, ir_ty), ir_body)
       }
-      Ast::App(fun, arg) => {
+      Ast::App(_, fun, arg) => {
         let ir_fun = self.lower_ast(*fun);
         let ir_arg = self.lower_ast(*arg);
         IR::app(ir_fun, ir_arg)
@@ -279,7 +279,8 @@ mod tests {
   use self::pretty::pretty_string;
 
 use super::*;
-  use types_base::{self as ast, type_infer, Ast};
+  use types_base::builder::AstBuilder;
+use types_base::{self as ast, type_infer, Ast};
 
   fn lower_test(ast: Ast<ast::Var>) -> (IR, Type) {
     let (ast, scheme) = type_infer(ast).expect("Type inference to succeed");
@@ -288,7 +289,8 @@ use super::*;
 
   #[test]
   fn lower_int() {
-    let ast = Ast::Int(3);
+    let b = AstBuilder::default();
+    let ast = b.int(3);
 
     let (ir, ir_ty) = lower_test(ast);
 
@@ -304,7 +306,8 @@ use super::*;
   #[test]
   fn lower_id_fun() {
     let x = ast::Var(0);
-    let ast = Ast::fun(x, Ast::Var(x));
+    let b = AstBuilder::default();
+    let ast = b.fun(x, b.var(x));
 
     let (ir, ir_ty) = lower_test(ast);
 

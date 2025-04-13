@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::ast::{Ast, ItemWrapper, TypedVar};
+use crate::ast::{Ast, BranchMeta, ItemWrapper, TypedVar};
 use crate::ty::{ClosedRow, Row, RowCombination, RowUniVar, RowVar, Type, TypeUniVar, TypeVar};
 use crate::{Evidence, TypeInference};
 
@@ -135,54 +135,61 @@ impl TypeInference {
     }
   }
 
-  pub(crate) fn substitute_ast(&mut self, ast: Ast<TypedVar>) -> SubstOut<Ast<TypedVar>> { 
+  pub(crate) fn substitute_ast(&mut self, ast: Ast<TypedVar>) -> SubstOut<Ast<TypedVar>> {
     match ast {
-      Ast::Var(id, v) => self
+      Ast::Var(v) => self
         .substitute_ty(v.1)
-        .map(|ty| Ast::Var(id, TypedVar(v.0, ty))),
-      Ast::Int(id, i) => SubstOut::new(Ast::Int(id, i)),
-      Ast::Fun(id, arg, body) => self
+        .map(|ty| Ast::Var(TypedVar(v.0, ty))),
+      Ast::Int(i) => SubstOut::new(Ast::Int(i)),
+      Ast::Fun(arg, body) => self
         .substitute_ty(arg.1)
         .map(|ty| TypedVar(arg.0, ty))
-        .merge(self.substitute_ast(*body), |arg, body| {
-          Ast::fun(id, arg, body)
-        }),
-      Ast::App(id, fun, arg) => self
+        .merge(self.substitute_ast(*body), Ast::fun),
+      Ast::App(fun, arg) => self
         .substitute_ast(*fun)
-        .merge(self.substitute_ast(*arg), |fun, arg| Ast::app(id, fun, arg)),
+        .merge(self.substitute_ast(*arg), Ast::app),
       // Label constructor and destructor
-      Ast::Label(id, label, ast) => self
+      Ast::Label(label, ast) => self.substitute_ast(*ast).map(|ast| Ast::label(label, ast)),
+      Ast::Unlabel(ast, label) => self
         .substitute_ast(*ast)
-        .map(|ast| Ast::label(id, label, ast)),
-      Ast::Unlabel(id, ast, label) => self
-        .substitute_ast(*ast)
-        .map(|ast| Ast::unlabel(id, ast, label)),
+        .map(|ast| Ast::unlabel(ast, label)),
       // Products constructor and destructor
-      Ast::Concat(id, left, right) => self
-        .substitute_ast(*left)
-        .merge(self.substitute_ast(*right), |left, right| {
-          Ast::concat(id, left, right)
+      Ast::Concat(meta, left, right) => self
+        .substitute_evidence(meta.expect("Type checking should've set concat meta"))
+        .merge(self.substitute_ast(*left), |m, l| (m, l))
+        .merge(self.substitute_ast(*right), |(meta, left), right| {
+          Ast::concat(meta, left, right)
         }),
-      Ast::Project(id, dir, ast) => self
-        .substitute_ast(*ast)
-        .map(|ast| Ast::project(id, dir, ast)),
+      Ast::Project(meta, dir, ast) => self
+        .substitute_evidence(meta.expect("Type checking should've set project meta"))
+        .merge(self.substitute_ast(*ast), |meta, ast| {
+          Ast::project(meta, dir, ast)
+        }),
       // Sums constructor and destructor
-      Ast::Branch(id, left, right) => self
-        .substitute_ast(*left)
-        .merge(self.substitute_ast(*right), |left, right| {
-          Ast::branch(id, left, right)
+      Ast::Branch(meta, left, right) => self
+        .substitute_branch_meta(meta.expect("Type checking should've set branch meta"))
+        .merge(self.substitute_ast(*left), |m, l| (m, l))
+        .merge(self.substitute_ast(*right), |(meta, left), right| {
+          Ast::branch(meta, left, right)
         }),
-      Ast::Inject(id, dir, ast) => self
-        .substitute_ast(*ast)
-        .map(|ast| Ast::inject(id, dir, ast)),
-      Ast::Item(id, item) => SubstOut::new(Ast::Item(id, item)),
+      Ast::Inject(meta, dir, ast) => self
+        .substitute_evidence(meta.expect("Type checking should've set inject meta"))
+        .merge(self.substitute_ast(*ast), |meta, ast| {
+          Ast::inject(meta, dir, ast)
+        }),
+      Ast::Item(wrapper, item_id) => self
+        .substitute_wrapper(wrapper)
+        .map(|wrapper| Ast::Item(wrapper, item_id)),
     }
   }
 
   pub(crate) fn substitute_wrapper(
     &mut self,
-    wrapper: ItemWrapper,
-  ) -> SubstOut<ItemWrapper> {
+    wrapper: Option<ItemWrapper>,
+  ) -> SubstOut<Option<ItemWrapper>> {
+    let Some(wrapper) = wrapper else {
+      return SubstOut::new(None);
+    };
     fn transpose<T>(vec: Vec<SubstOut<T>>) -> SubstOut<Vec<T>> {
       let mut subst = SubstOut::new(vec![]);
       for ele in vec {
@@ -219,13 +226,21 @@ impl TypeInference {
           .collect(),
       ),
       |(types, rows), evidence| {
-        ItemWrapper {
+        Some(ItemWrapper {
           types,
           rows,
           evidence,
-        }
+        })
       },
     )
+  }
+
+  pub(crate) fn substitute_branch_meta(&mut self, meta: BranchMeta) -> SubstOut<BranchMeta> {
+    self
+      .substitute_ty(meta.ty)
+      .merge(self.substitute_evidence(meta.evidence), |ty, evidence| {
+        BranchMeta { ty, evidence }
+      })
   }
 
   pub(crate) fn substitute_evidence(&mut self, ev: Evidence) -> SubstOut<Evidence> {

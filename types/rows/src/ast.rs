@@ -1,11 +1,13 @@
 use crate::ty::Type;
-use crate::Evidence;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 pub struct Var(pub usize);
 
 #[derive(PartialEq, Eq, Clone, Debug, Hash)]
 pub struct TypedVar(pub Var, pub Type);
+
+#[derive(PartialEq, Eq, Clone, Debug, PartialOrd, Ord, Copy, Hash)]
+pub struct NodeId(pub u32);
 
 /// Our labels are strings, but we could imagine in a production grade compiler labels would be
 /// interned and represented by their intern token.
@@ -24,82 +26,73 @@ pub enum Direction {
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub enum Ast<V> {
   /// A local variable
-  Var(V),
+  Var(NodeId, V),
   /// An integer literal
-  Int(isize),
+  Int(NodeId, isize),
   /// A function literal (lambda, closure).
-  Fun(V, Box<Self>),
+  Fun(NodeId, V, Box<Self>),
   /// Function application
-  App(Box<Self>, Box<Self>),
+  App(NodeId, Box<Self>, Box<Self>),
   // --- Row Nodes ---
   // Label a node turning it into a singleton row
-  Label(Label, Box<Self>),
+  Label(NodeId, Label, Box<Self>),
   // Unwrap a singleton row into it's underlying value
-  Unlabel(Box<Self>, Label),
+  Unlabel(NodeId, Box<Self>, Label),
   // Concat two products
-  Concat(Option<Evidence>, Box<Self>, Box<Self>),
+  Concat(NodeId, Box<Self>, Box<Self>),
   // Project a product into a sub product
-  Project(Option<Evidence>, Direction, Box<Self>),
+  Project(NodeId, Direction, Box<Self>),
   // Branch on a sum type to two handler functions
-  Branch(Option<BranchMeta>, Box<Self>, Box<Self>),
+  Branch(NodeId, Box<Self>, Box<Self>),
   // Inject a value into a sum type
-  Inject(Option<Evidence>, Direction, Box<Self>),
-}
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub struct BranchMeta {
-  pub evidence: Evidence,
-  pub ty: Type
+  Inject(NodeId, Direction, Box<Self>),
 }
 
 impl<V> Ast<V> {
-  pub fn fun(arg: V, body: Self) -> Self {
-    Self::Fun(arg, Box::new(body))
+  pub(crate) fn id(&self) -> NodeId {
+    match self {
+      Ast::Var(node_id, _)
+      | Ast::Int(node_id, _)
+      | Ast::Fun(node_id, _, _)
+      | Ast::App(node_id, _, _)
+      |  Ast::Label(node_id, _, _)
+      |  Ast::Unlabel(node_id, _, _)
+      |  Ast::Concat(node_id, _, _)
+      |  Ast::Project(node_id, _, _)
+      |  Ast::Branch(node_id, _, _)
+      |  Ast::Inject(node_id, _, _) => *node_id,
+    }
   }
 
-  pub fn app(fun: Self, arg: Self) -> Self {
-    Self::App(Box::new(fun), Box::new(arg))
+  pub fn fun(node_id: NodeId, arg: V, body: Self) -> Self {
+    Self::Fun(node_id, arg, Box::new(body))
   }
 
-  pub fn label(label: impl ToString, value: Self) -> Self {
-    Self::Label(label.to_string(), Box::new(value))
+  pub fn app(node_id: NodeId, fun: Self, arg: Self) -> Self {
+    Self::App(node_id, Box::new(fun), Box::new(arg))
   }
 
-  pub fn unlabel(value: Self, label: impl ToString) -> Self {
-    Self::Unlabel(Box::new(value), label.to_string())
+  pub fn label(node_id: NodeId, label: impl ToString, value: Self) -> Self {
+    Self::Label(node_id, label.to_string(), Box::new(value))
   }
 
-  pub fn project(meta: Evidence, dir: Direction, value: Self) -> Self {
-    Self::Project(Some(meta), dir, Box::new(value))
+  pub fn unlabel(node_id: NodeId, value: Self, label: impl ToString) -> Self {
+    Self::Unlabel(node_id, Box::new(value), label.to_string())
   }
 
-  pub fn concat(meta: Evidence, left: Self, right: Self) -> Self {
-    Self::Concat(Some(meta), Box::new(left), Box::new(right))
+  pub fn project(node_id: NodeId, dir: Direction, value: Self) -> Self {
+    Self::Project(node_id, dir, Box::new(value))
   }
 
-  pub fn inject(meta: Evidence, dir: Direction, value: Self) -> Self {
-    Self::Inject(Some(meta), dir, Box::new(value))
+  pub fn concat(node_id: NodeId, left: Self, right: Self) -> Self {
+    Self::Concat(node_id, Box::new(left), Box::new(right))
   }
 
-  pub fn branch(meta: BranchMeta, left: Self, right: Self) -> Self {
-    Self::Branch(Some(meta), Box::new(left), Box::new(right))
-  }
-}
-
-impl Ast<Var> {
-  pub fn project_(dir: Direction, value: Self) -> Self {
-    Self::Project(None, dir, Box::new(value))
+  pub fn inject(node_id: NodeId, dir: Direction, value: Self) -> Self {
+    Self::Inject(node_id, dir, Box::new(value))
   }
 
-  pub fn concat_(left: Self, right: Self) -> Self {
-    Self::Concat(None, Box::new(left), Box::new(right))
-  }
-
-  pub fn inject_(dir: Direction, value: Self) -> Self {
-    Self::Inject(None, dir, Box::new(value))
-  }
-
-  pub fn branch_(left: Self, right: Self) -> Self {
-    Self::Branch(None, Box::new(left), Box::new(right))
+  pub fn branch(node_id: NodeId, left: Self, right: Self) -> Self {
+    Self::Branch(node_id, Box::new(left), Box::new(right))
   }
 }
