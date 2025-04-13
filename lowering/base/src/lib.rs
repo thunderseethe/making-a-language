@@ -292,7 +292,7 @@ impl LowerAst {
   }
 }
 
-pub fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type, VarSupply) {
+pub fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
   let (ir_ty, types) = lower_ty_scheme(scheme);
   let mut lower_ast = LowerAst {
     supply: VarSupply::default(),
@@ -300,7 +300,7 @@ pub fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type, VarSuppl
   };
   let ir = lower_ast.lower_ast(ast);
   let bound_ir = (0..lower_ast.types.env.len()).fold(ir, |ir, _| IR::ty_fun(Kind::Type, ir));
-  (bound_ir, ir_ty, lower_ast.supply)
+  (bound_ir, ir_ty)
 }
 
 #[cfg(test)]
@@ -313,7 +313,7 @@ mod tests {
 
   fn lower_test(ast: Ast<ast::Var>) -> (IR, Type) {
     let (ast, scheme) = type_infer(ast).expect("Type inference to succeed");
-    let (ir, ty, _) = lower(ast, scheme);
+    let (ir, ty) = lower(ast, scheme);
     (ir, ty)
   }
 

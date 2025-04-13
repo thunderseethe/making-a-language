@@ -917,20 +917,21 @@ impl LowerAst {
         IR::app(prj_direction, term)
       }
       Ast::Branch(id, left, right) => {
-        let ev = self
+        let param = self
           .row_to_ev
           .get(&id)
-          .expect("ICE: Branch AST node lacks expected evidence");
-        let param = self.lookup_ev(ev.clone());
+          .cloned()
+          .map(|ev| self.lookup_ev(ev))
+          .expect("ICE: Branch AST node lacks an expected evidence");
 
         let ret_ty = self
           .branch_to_ret_ty
           .get(&id)
           .map(|ty| self.types.lower_ty(ty.clone()))
           .expect("ICE: Branch AST node lacks expected type");
+        let branch = IR::ty_app(IR::field(IR::Var(param), 1), TyApp::Ty(ret_ty));
         let left = self.lower_ast(*left);
         let right = self.lower_ast(*right);
-        let branch = IR::ty_app(IR::field(IR::Var(param), 1), TyApp::Ty(ret_ty));
         IR::app(IR::app(branch, left), right)
       }
       Ast::Inject(id, direction, body) => {

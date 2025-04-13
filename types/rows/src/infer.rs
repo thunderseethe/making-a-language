@@ -124,7 +124,7 @@ impl TypeInference {
         constraints.extend(right_out.constraints);
         // Add a new constraint for our row combination to solve concat
         constraints.push(Constraint::RowCombine(id, row_comb.clone()));
-        self.row_to_ev.insert(id, row_comb);
+        self.row_to_combo.insert(id, row_comb);
 
         let typed_ast = Ast::concat(
           id, 
@@ -155,7 +155,7 @@ impl TypeInference {
         out
           .constraints
           .push(Constraint::RowCombine(id, row_comb.clone()));
-        self.row_to_ev.insert(id, row_comb);
+        self.row_to_combo.insert(id, row_comb);
         (
           out.with_typed_ast(|ast| Ast::project(id, dir, ast)),
           // Our sub row is the output type of the projection
@@ -189,7 +189,7 @@ impl TypeInference {
         let mut constraints = left_out.constraints;
         constraints.extend(right_out.constraints);
         constraints.push(Constraint::RowCombine(id, row_comb.clone()));
-        self.row_to_ev.insert(id, row_comb);
+        self.row_to_combo.insert(id, row_comb);
         self.branch_to_ret_ty.insert(id, Type::Var(ret_ty));
 
         (
@@ -219,7 +219,7 @@ impl TypeInference {
         out
           .constraints
           .push(Constraint::RowCombine(id, row_comb.clone()));
-        self.row_to_ev.insert(id, row_comb);
+        self.row_to_combo.insert(id, row_comb);
         (
           out.with_typed_ast(|ast| Ast::inject(id, dir, ast)),
           // Our goal row is the type of our output
@@ -270,7 +270,7 @@ impl TypeInference {
         };
 
         constraints.push(Constraint::RowCombine(id, row_comb.clone()));
-        self.row_to_ev.insert(id, row_comb);
+        self.row_to_combo.insert(id, row_comb);
 
         let typed_ast = Ast::concat(
           id,
@@ -301,7 +301,7 @@ impl TypeInference {
           .constraints
           .push(Constraint::RowCombine(id, row_comb.clone()));
 
-        self.row_to_ev.insert(id, row_comb);
+        self.row_to_combo.insert(id, row_comb);
         out.with_typed_ast(|ast| Ast::project(id, dir, ast))
       }
       (Ast::Branch(id, left_ast, right_ast), Type::Fun(arg_ty, ret_ty)) => {
@@ -336,7 +336,7 @@ impl TypeInference {
         constraints.extend(right_out.constraints);
         let row_comb = RowCombination { left, right, goal };
         constraints.push(Constraint::RowCombine(id, row_comb.clone()));
-        self.row_to_ev.insert(id, row_comb);
+        self.row_to_combo.insert(id, row_comb);
         self.branch_to_ret_ty.insert(id, *ret_ty);
 
         InferOut {
@@ -363,7 +363,7 @@ impl TypeInference {
         out
           .constraints
           .push(Constraint::RowCombine(id, row_comb.clone()));
-        self.row_to_ev.insert(id, row_comb);
+        self.row_to_combo.insert(id, row_comb);
         out.with_typed_ast(|ast| Ast::inject(id, dir, ast))
       }
       (ast, expected_ty) => {

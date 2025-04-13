@@ -31,7 +31,7 @@ pub struct TypeInference {
   unification_table: InPlaceUnificationTable<TypeVar>,
   row_unification_table: InPlaceUnificationTable<RowVar>,
   partial_row_combs: BTreeSet<RowCombination>,
-  row_to_ev: HashMap<NodeId, RowCombination>,
+  row_to_combo: HashMap<NodeId, RowCombination>,
   branch_to_ret_ty: HashMap<NodeId, Type>,
 }
 
@@ -140,7 +140,7 @@ pub fn type_infer(ast: Ast<Var>) -> Result<TypesOutput, TypeError> {
     })
     .collect();
 
-  let row_to_ev = std::mem::take(&mut ctx.row_to_ev).into_iter()
+  let row_to_ev = std::mem::take(&mut ctx.row_to_combo).into_iter()
         .map(|(id, combo)| {
           let out = ctx.substitute_row_comb(combo);
           ev_out.unbound_rows.extend(out.unbound_rows);
