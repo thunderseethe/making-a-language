@@ -242,19 +242,18 @@ where
           )
           .brackets()
           .group();
-        let multi = a.hardline().append(
-          a.space()
-            .append(a.intersperse(
-              locals.into_iter().map(pretty_local),
-              a.hardline().append(a.text(",")).append(a.space()),
-            ))
-            .append(a.hardline())
-            .brackets()
-            .align(),
-        ).nest(2);
+        let multi = a
+          .space()
+          .append(a.intersperse(
+            locals.into_iter().map(pretty_local),
+            a.hardline().append(a.text(",")).append(a.space()),
+          ))
+          .append(a.hardline())
+          .brackets()
+          .align();
 
         a.text("let")
-          .append(multi.flat_alt(single))
+          .append(a.hardline().append(multi.flat_alt(single).group()).nest(2))
           .append(a.line().append(body.pretty(a)).nest(2))
           .parens()
           .group()
@@ -263,7 +262,7 @@ where
   }
 }
 
-pub(crate) fn pretty_string<'a>(pretty: impl Pretty<'a, RcAllocator>, width: usize) -> String {
+pub fn pretty_string<'a>(pretty: impl Pretty<'a, RcAllocator>, width: usize) -> String {
   let mut s = String::new();
   pretty
     .pretty(&RcAllocator)

@@ -3,15 +3,14 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use ena::unify::InPlaceUnificationTable;
 
-pub use self::ast::{Ast, Direction, ItemId, TypedVar, Var};
-use self::ast::{ItemWrapper, NodeId};
+pub use self::ast::{Ast, Direction, ItemId, TypedVar, Var, NodeId, ItemWrapper};
 use self::subst::SubstOut;
 pub use self::ty::{ClosedRow, Row, RowCombination, RowVar, Type, TypeVar};
 use self::ty::{RowUniVar, TypeUniVar};
 use self::unification::{TypeError, TypeErrorKind};
 
 mod ast;
-mod builder;
+pub mod builder;
 mod infer;
 mod inst;
 mod subst;

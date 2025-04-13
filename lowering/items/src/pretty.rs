@@ -44,14 +44,18 @@ impl Type {
     }
   }
 
-  fn collect_forall_kinds(self, expected_kind: Kind, kinds: &mut Vec<Kind>) -> Type {
+  fn collect_ty_fun_kinds(self, expected_kind: Kind, kinds: &mut Vec<Kind>) -> Type {
     match self {
       Type::TyFun(kind, ty) if kind == expected_kind => {
         kinds.push(kind);
-        ty.collect_forall_kinds(expected_kind, kinds)
+        ty.collect_ty_fun_kinds(expected_kind, kinds)
       }
       ty => ty,
     }
+  }
+
+  fn requires_paren(&self) -> bool {
+    matches!(self, Type::Fun(_, _) | Type::TyFun(_, _))
   }
 }
 
@@ -108,12 +112,17 @@ where
       Type::Fun(arg, ret) => {
         let mut tys = vec![*arg];
         ret.collect_fun_tys_into(&mut tys);
-        a.intersperse(tys.into_iter().map(|ty| ty.pretty(a)), " -> ")
+        a.intersperse(tys.into_iter().map(|ty| 
+            if ty.requires_paren() {
+              ty.pretty(a).parens()
+            } else {
+              ty.pretty(a)
+            }), " -> ")
       }
       Type::TyFun(kind, ty) => {
         let mut kinds = vec![kind];
-        let ty = ty.collect_forall_kinds(kind, &mut kinds);
-        a.text("forall")
+        let ty = ty.collect_ty_fun_kinds(kind, &mut kinds);
+        a.text("ty_fun")
           .append(a.space())
           .append(
             a.intersperse(
@@ -184,6 +193,15 @@ impl IR {
       self
     }
   }
+
+  fn collect_locals(self, locals: &mut Vec<(Var, Box<Self>)>) -> Self {
+    if let IR::Local(var, defn, body) = self {
+      locals.push((var, defn));
+      body.collect_locals(locals)
+    } else {
+      self
+    }
+  }
 }
 
 impl<'a, D> Pretty<'a, D> for IR
@@ -246,6 +264,44 @@ where
           .parens()
           .group()
       }
+      IR::Local(var, defn, body) => {
+        let mut locals = vec![(var, defn)];
+        let body = body.collect_locals(&mut locals);
+
+        let pretty_local = |(var, defn): (Var, Box<IR>)| {
+          var
+            .pretty(a)
+            .append(a.space())
+            .append(defn.pretty(a))
+            .parens()
+        };
+        let single = a
+          .intersperse(
+            locals.clone().into_iter().map(pretty_local),
+            a.text(",").append(a.space()),
+          )
+          .brackets()
+          .group();
+        let multi = a
+          .hardline()
+          .append(
+            a.space()
+              .append(a.intersperse(
+                locals.into_iter().map(pretty_local),
+                a.hardline().append(a.text(",")).append(a.space()),
+              ))
+              .append(a.hardline())
+              .brackets()
+              .align(),
+          )
+          .nest(2);
+
+        a.text("let")
+          .append(multi.flat_alt(single))
+          .append(a.line().append(body.pretty(a)).nest(2))
+          .parens()
+          .group()
+      },
       IR::Tuple(elems) => {
         let single = a
           .intersperse(

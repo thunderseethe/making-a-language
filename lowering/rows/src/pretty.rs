@@ -44,14 +44,18 @@ impl Type {
     }
   }
 
-  fn collect_forall_kinds(self, expected_kind: Kind, kinds: &mut Vec<Kind>) -> Type {
+  fn collect_tyfun_kinds(self, expected_kind: Kind, kinds: &mut Vec<Kind>) -> Type {
     match self {
       Type::TyFun(kind, ty) if kind == expected_kind => {
         kinds.push(kind);
-        ty.collect_forall_kinds(expected_kind, kinds)
+        ty.collect_tyfun_kinds(expected_kind, kinds)
       }
       ty => ty,
     }
+  }
+
+  fn requires_parens(&self) -> bool {
+    matches!(self, Type::Fun(_, _) | Type::TyFun(_, _))
   }
 }
 
@@ -107,12 +111,21 @@ where
       Type::Fun(arg, ret) => {
         let mut tys = vec![*arg];
         ret.collect_fun_tys_into(&mut tys);
-        a.intersperse(tys.into_iter().map(|ty| ty.pretty(a)), " -> ")
+        a.intersperse(
+          tys.into_iter().map(|ty| {
+            if ty.requires_parens() {
+              ty.pretty(a).parens()
+            } else {
+              ty.pretty(a)
+            }
+          }),
+          " -> ",
+        )
       }
       Type::TyFun(kind, ty) => {
         let mut kinds = vec![kind];
-        let ty = ty.collect_forall_kinds(kind, &mut kinds);
-        a.text("forall")
+        let ty = ty.collect_tyfun_kinds(kind, &mut kinds);
+        a.text("ty_fun")
           .append(a.space())
           .append(
             a.intersperse(
@@ -272,16 +285,19 @@ where
           )
           .brackets()
           .group();
-        let multi = a.hardline().append(
-          a.space()
-            .append(a.intersperse(
-              locals.into_iter().map(pretty_local),
-              a.hardline().append(a.text(",")).append(a.space()),
-            ))
-            .append(a.hardline())
-            .brackets()
-            .align(),
-        ).nest(2);
+        let multi = a
+          .hardline()
+          .append(
+            a.space()
+              .append(a.intersperse(
+                locals.into_iter().map(pretty_local),
+                a.hardline().append(a.text(",")).append(a.space()),
+              ))
+              .append(a.hardline())
+              .brackets()
+              .align(),
+          )
+          .nest(2);
 
         a.text("let")
           .append(multi.flat_alt(single))
