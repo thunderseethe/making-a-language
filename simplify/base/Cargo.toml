@@ -1,0 +1,12 @@
+[package]
+name = "simplify-base"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lowering-base.workspace = true
+im.workspace = true
+
+[dev-dependencies]
+expect-test.workspace = true
+types-base.workspace = true

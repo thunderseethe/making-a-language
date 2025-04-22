@@ -138,6 +138,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "simplify-base"
+version = "0.1.0"
+dependencies = [
+ "expect-test",
+ "im",
+ "lowering-base",
+ "types-base",
+]
+
+[[package]]
 name = "sized-chunks"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
