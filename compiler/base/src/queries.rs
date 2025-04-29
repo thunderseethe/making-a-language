@@ -4,9 +4,10 @@ use std::ops::Range;
 use dashmap::DashMap;
 use desugar_base::{DesugarError, ErrorKind, SyncNode};
 use name_resolution_base::NameResolutionError;
-use parser_base::{ParseError, RowanCst};
-use tower_lsp_server::lsp_types::{Diagnostic, Position, Range as LspRange, Uri};
+use parser_base::{Lang, ParseError, RowanCst, SyntaxNode};
+use tower_lsp_server::lsp_types::{Diagnostic, LinkedEditingRanges, Position, Range as LspRange, Uri};
 use types_base::{Ast, NodeId, TypeError, TypeErrorKind, TypeScheme, TypedVar, Var};
+use wasm_bindgen::JsValue;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum Color {
@@ -79,6 +80,8 @@ impl Newlines {
       // Include 1 character for the newline itself
       byte += line.len() + 1;
     }
+    // Push our final line.
+    line_offsets.push(byte);
     Self {
       line_offsets,
       len: content.len(),
@@ -89,7 +92,7 @@ impl Newlines {
     if byte >= self.len {
       return None;
     } 
-    let line = self.line_offsets.partition_point(|&offset| byte <= offset);
+    let line = self.line_offsets.partition_point(|&offset| offset <= byte);
     let start = self.line_offsets[line];
     let col = byte - start;
     Some((line.try_into().unwrap(), col.try_into().unwrap()))
@@ -312,7 +315,10 @@ impl Database {
   pub fn diagnostics(&self, uri: Uri) -> Vec<Diagnostic> {
     // TODO: We should produce multiple diagnostics here.
     match self.types_of(uri.clone()) {
-      Ok(_) => vec![],
+      Ok(_) => {
+        web_sys::console::log_1(&JsValue::from_str("types were chill"));
+        vec![]
+      },
       Err(err) => {
         let newlines = self.newlines_of(uri.clone());
 
@@ -366,13 +372,17 @@ impl Database {
             )]
           }
           PellucidError::Types(types) => {
+
             let (_, ast_to_cst) = self
-              .desugar_of(uri)
+              .desugar_of(uri.clone())
               .expect("We can be sure this is Ok(_) otherwise we'd hit DesugarError case above");
 
             vec![Diagnostic::new_simple(
               newlines.lsp_range_for(ast_to_cst[&types.node_id].span.into())
-                .unwrap_or_else(|| panic!("error span outside range: {:?}", ast_to_cst[&types.node_id].span)),
+                .unwrap_or_else(|| {
+                  let (cst, _) = self.cst_of(uri); 
+                  panic!("error span outside range: {:?}\n{}", ast_to_cst[&types.node_id].span, SyntaxNode::<Lang>::new_root(cst))
+                }),
               match types.kind {
                 TypeErrorKind::TypeNotEqual(left, right) => {
                   format!("Types are not equal: {:?} != {:?}", left, right)
