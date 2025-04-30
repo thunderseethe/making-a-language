@@ -286,25 +286,26 @@ impl Simplifier {
       })
       .collect::<Vec<_>>();
 
-    // If we have a non trivial argument in context, there's some benefit.
-    if args.iter().take(params.len()).any(|arg| match arg {
-      Arg::Val(arg) => {
-        !arg.is_trivial()
-          || match arg {
-            IR::Var(var) => matches!(in_scope.get(&var.id), Some(Definition::BoundTo(_, _))),
-            _ => false,
-          }
-      }
-      Arg::Ty(_) => false,
-    }) {
-      return true;
-    }
-
     // We have enough arguments to saturate our parameters.
     // We know this is a local function so there is benefit to inline
     // If we saturate all args to our function and then apply more args to the body there is value
     // in inlining.
-    args.len() >= params.len()
+    if args.len() >= params.len() {
+      return true;
+    }
+
+    // If we have a non trivial argument in context, there's some benefit.
+    args.iter().take(params.len()).any(|arg| match arg {
+      Arg::Val(arg) => {
+        !arg.is_trivial()
+          || match arg {
+            IR::Var(var) => 
+                matches!(in_scope.get(&var.id), Some(Definition::BoundTo(_, _))),
+            _ => false,
+          }
+      }
+      Arg::Ty(_) => false,
+    })
   }
 
   fn rebuild(&mut self, mut ir: IR, in_scope: InScope, mut ctx: Context) -> IR {
@@ -454,12 +455,10 @@ impl Simplifier {
       Occurrence::Dead | Occurrence::Once => panic!("ICE: should_inline encountered unexpected dead or once occurrence. This should've been handled prior"),
       Occurrence::OnceInFun => ir.is_value() && self.some_benefit(ir, in_scope, ctx),
       Occurrence::Many => {
-        let size = ir.size();
-        let no_size_increase = size == 0;
-        let small_enough = size <= self.inline_size_threshold;
+        let small_enough = ir.size() <= self.inline_size_threshold;
         ir.is_value()
-        && (no_size_increase
-              || (small_enough && self.some_benefit(ir, in_scope, ctx)))
+          && small_enough 
+          && self.some_benefit(ir, in_scope, ctx)
       },
     }
   }
