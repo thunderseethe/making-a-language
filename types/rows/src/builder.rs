@@ -1,4 +1,4 @@
-use crate::{Ast, NodeId, Var};
+use crate::{Ast, Direction, NodeId, Var};
 
 pub fn make_vars<const N: usize>() -> [Var; N] {
   let mut vars = [Var(0); N];
@@ -65,6 +65,29 @@ impl AstBuilder {
     binds.into_iter().rfold(body, |body, (var, defn)| {
       Ast::app(self.next_id(), Ast::fun(self.next_id(), var, body), defn)
     })
+  }
+
+  pub fn label<V>(&self, label: impl ToString, value: Ast<V>) -> Ast<V> {
+    Ast::label(self.next_id(), label, value)
+  }
+  pub fn unlabel<V>(&self, value: Ast<V>, label: impl ToString) -> Ast<V> {
+    Ast::unlabel(self.next_id(), value, label)
+  }
+
+  pub fn concat<V>(&self, left: Ast<V>, right: Ast<V>) -> Ast<V> {
+    Ast::concat(self.next_id(), left, right)
+  }
+
+  pub fn project<V>(&self, dir: Direction, value: Ast<V>) -> Ast<V> {
+    Ast::project(self.next_id(), dir, value)
+  }
+
+  pub fn branch<V>(&self, left: Ast<V>, right: Ast<V>) -> Ast<V> {
+    Ast::branch(self.next_id(), left, right)
+  }
+
+  pub fn inject<V>(&self, dir: Direction, value: Ast<V>) -> Ast<V> {
+    Ast::inject(self.next_id(), dir, value)
   }
 }
 

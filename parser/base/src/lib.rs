@@ -330,10 +330,8 @@ let x_y_2 = ( \ x ->
 "#;
     let (tree, _) = parse(input);
     let expect = expect_test::expect![[r#"
-
-        let x_y_2 = ( \ x -> 
-            \ y -> x) 2 (\z test_id -> z)
-  "#]];
-    expect.assert_eq(&tree.to_string());
+    let x_y_2 = ( \ x -> 
+        \ y -> x) 2 (\z test_id -> z)"#]];
+    expect.assert_eq(tree.to_string().trim());
   }
 }

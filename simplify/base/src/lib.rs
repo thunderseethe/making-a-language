@@ -53,28 +53,23 @@ impl IRExt for IR {
   }
 
   fn size(&self) -> usize {
-    fn size_app(ir: &IR, arg_count: usize) -> usize {
+    fn size_app(ir: &IR, args: usize) -> usize {
       match ir {
-        IR::App(fun, _) => size_app(fun, arg_count + 1),
-        IR::TyApp(ir, _) => size_app(ir, arg_count),
-        IR::Var(_) => {
-          if arg_count > 0 {
-            1 + arg_count
-          } else {
-            0
-          }
-        }
-        ir => ir.size() + arg_count,
+        IR::App(fun, arg) => arg.size() + size_app(fun, args + 1),
+        IR::TyApp(ir, _) => size_app(ir, args),
+        ir => ir.size() + 10 * (1 + args),
       }
     }
     match self {
       IR::Var(_) | IR::Int(_) => 0,
-      IR::Fun(_, body) => 1 + body.size(),
-      IR::App(fun, _) => size_app(fun, 1),
+      IR::Fun(_, body) => 10 + body.size(),
+      IR::App(fun, arg) => arg.size() + size_app(fun, 1),
       IR::TyFun(_, ir) => ir.size(),
       IR::TyApp(ir, _) => ir.size(),
       IR::Local(var, defn, body) => {
-        defn.size() + body.size() + (if var.ty.is_stack_alloc() { 0 } else { 1 })
+        defn.size() 
+          + body.size() 
+          + (if var.ty.is_stack_alloc() { 0 } else { 10 })
       }
     }
   }
@@ -111,9 +106,13 @@ pub fn subst_ty(haystack: IR, payload: Type) -> IR {
 
 #[derive(PartialEq, Eq, Clone, Copy, Debug)]
 enum Occurrence {
+  /// Our variable never occurs
   Dead,
+  /// Our variable appears once.
   Once,
+  /// Our variable appears once inside a Fun node.
   OnceInFun,
+  /// Our variable appears many times.
   Many,
 }
 
@@ -152,7 +151,6 @@ impl Occurrences {
   }
 
   fn merge(mut self, other: Self) -> Self {
-    let once_meet = Occurrence::Many;
     for (var, occ) in other.vars {
       self
         .vars
@@ -161,7 +159,7 @@ impl Occurrences {
           *self_occ = match (*self_occ, occ) {
             (Occurrence::Dead, occ) | (occ, Occurrence::Dead) => occ,
             (Occurrence::Many, _) | (_, Occurrence::Many) => Occurrence::Many,
-            (Occurrence::Once, Occurrence::Once) => once_meet,
+            (Occurrence::Once, Occurrence::Once) => Occurrence::Many,
             (Occurrence::Once, _) | (Occurrence::OnceInFun, _) => Occurrence::Many,
           };
         })
@@ -257,10 +255,16 @@ impl Default for Simplifier {
 enum ContextEntry {
   App(IR),
   TyApp(Type),
+  TyFun(Kind),
   Local(Var, Occurrence, IR),
 }
 
 type Context = Vec<(ContextEntry, Subst)>;
+
+enum Arg<'a> {
+  Val(&'a IR),
+  Ty(&'a Type),
+}
 
 impl Simplifier {
   fn new(occs: Occurrences) -> Self {
@@ -270,30 +274,38 @@ impl Simplifier {
     }
   }
 
-  fn some_benefit(&self, ir: &IR, ctx: &Context) -> bool {
+  fn some_benefit(&self, ir: &IR, in_scope: &InScope, ctx: &Context) -> bool {
     let (params, _) = ir.clone().split_funs();
-    // If we have a non trivial argument in context, there's some benefit.
-    if ctx
+    let args = ctx
       .iter()
       .rev()
-      .take(params.len())
-      .any(|entry| match entry {
-        (ContextEntry::App(arg), _) => !arg.is_trivial(),
-        _ => false,
+      .map_while(|entry| match entry {
+        (ContextEntry::App(arg), _) => Some(Arg::Val(arg)),
+        (ContextEntry::TyApp(ty), _) => Some(Arg::Ty(ty)),
+        _ => None,
       })
-    {
-      return true;
-    }
+      .collect::<Vec<_>>();
 
     // We have enough arguments to saturate our parameters.
     // We know this is a local function so there is benefit to inline
-    if ctx.len() > params.len() {
+    // If we saturate all args to our function and then apply more args to the body there is value
+    // in inlining.
+    if args.len() >= params.len() {
       return true;
     }
 
-    // If we saturate all args to our function and then apply more args to the body there is value
-    // in inlining.
-    matches!(ctx.get(params.len()), Some((ContextEntry::App(_), _)))
+    // If we have a non trivial argument in context, there's some benefit.
+    args.iter().take(params.len()).any(|arg| match arg {
+      Arg::Val(arg) => {
+        !arg.is_trivial()
+          || match arg {
+            IR::Var(var) => 
+                matches!(in_scope.get(&var.id), Some(Definition::BoundTo(_, _))),
+            _ => false,
+          }
+      }
+      Arg::Ty(_) => false,
+    })
   }
 
   fn rebuild(&mut self, mut ir: IR, in_scope: InScope, mut ctx: Context) -> IR {
@@ -317,6 +329,9 @@ impl Simplifier {
             IR::ty_app(ir, ty)
           }
         }
+        ContextEntry::TyFun(kind) => {
+          ir = IR::ty_fun(kind, ir);
+        }
         ContextEntry::Local(var, occ, body) => {
           if ir.is_trivial() {
             self.locals_inlined += 1;
@@ -330,7 +345,10 @@ impl Simplifier {
             );
             // We might have inlined all occurrences of var while simplifying body.
             // If our binding is now dead, remove it.
-            ir = if let Occurrence::Dead = self.occs.lookup_var(&var) {
+            ir = if let Occurrence::Dead = 
+                self.occs.lookup_var(&var) 
+            {
+              self.locals_inlined += 1;
               body
             } else {
               IR::local(var, ir, body)
@@ -355,8 +373,8 @@ impl Simplifier {
         }
         IR::Int(i) => break self.rebuild(IR::Int(i), in_scope, ctx),
         IR::TyFun(kind, body) => {
-          let body = self.simplify(*body, in_scope.clone(), vec![]);
-          break self.rebuild(IR::ty_fun(kind, body), in_scope, ctx);
+          ctx.push((ContextEntry::TyFun(kind), self.subst.clone()));
+          *body
         }
         IR::Fun(var, body) => {
           let body = self.simplify(*body, in_scope.update(var.id, Definition::Unknown), vec![]);
@@ -415,7 +433,9 @@ impl Simplifier {
     in_scope
       .get(&var.id)
       .map(|bind| match bind {
-        Definition::BoundTo(payload, occ) if self.should_inline(payload, *occ, ctx) => {
+        Definition::BoundTo(definition, occ)
+          if self.should_inline(definition, *occ, &in_scope, ctx) =>
+        {
           self.subst = Subst::default();
           // If we inlined a OnceInFun occurrence, mark its binding as dead.
           // This prevents us from having to run more simplification passes to clean up dead
@@ -423,24 +443,22 @@ impl Simplifier {
           if let Occurrence::OnceInFun = occ {
             self.occs.mark_dead(&var.id);
           }
-          ControlFlow::Continue(payload.clone())
+          ControlFlow::Continue(definition.clone())
         }
         _ => ControlFlow::Break(var),
       })
       .expect("ICE: Unbound variable encountered in simplification")
   }
 
-  fn should_inline(&self, ir: &IR, occ: Occurrence, ctx: &Context) -> bool {
+  fn should_inline(&self, ir: &IR, occ: Occurrence, in_scope: &InScope, ctx: &Context) -> bool {
     match occ {
       Occurrence::Dead | Occurrence::Once => panic!("ICE: should_inline encountered unexpected dead or once occurrence. This should've been handled prior"),
-      Occurrence::OnceInFun => ir.is_value() && self.some_benefit(ir, ctx),
+      Occurrence::OnceInFun => ir.is_value() && self.some_benefit(ir, in_scope, ctx),
       Occurrence::Many => {
-          let size = ir.size();
-          let no_size_increase = size == 0;
-          let small_enough = size <= self.inline_size_threshold;
-          ir.is_value()
-          && (no_size_increase
-                || (small_enough && self.some_benefit(ir, ctx)))
+        let small_enough = ir.size() <= self.inline_size_threshold;
+        ir.is_value()
+          && small_enough 
+          && self.some_benefit(ir, in_scope, ctx)
       },
     }
   }
@@ -472,7 +490,8 @@ mod tests {
 
   fn simplify(ast: Ast<ast::Var>) -> IR {
     let (ast, scheme) = type_infer(ast).expect("Type checking failed");
-    let (ir, _, _) = lower(ast, scheme);
+    let (ir, _) = lower(ast, scheme);
+    eprintln!("{}", pretty_string(ir.clone(), 80));
     crate::simplify(ir)
   }
 
@@ -533,7 +552,8 @@ mod tests {
       b.app(
         b.fun(x, b.app(b.var(f), b.var(x))),
         b.fun(y, b.app(b.var(y), b.int(3005))),
-      ));
+      ),
+    );
 
     let ir = simplify(ast);
 
@@ -549,10 +569,7 @@ mod tests {
     let b = AstBuilder::default();
     let [x, y, f] = make_vars();
     let ast = b.app(
-      b.fun(
-        x,
-        b.fun(f, b.app(b.app(b.var(f), b.var(x)), b.var(x))),
-      ),
+      b.fun(x, b.fun(f, b.app(b.app(b.var(f), b.var(x)), b.var(x)))),
       b.fun(y, b.app(b.var(y), b.int(3005))),
     );
 
@@ -622,7 +639,10 @@ mod tests {
               build.locals(
                 [(
                   c,
-                  build.locals([(d, build.locals([(e, build.int(1))], build.var(e)))], build.var(d)),
+                  build.locals(
+                    [(d, build.locals([(e, build.int(1))], build.var(e)))],
+                    build.var(d),
+                  ),
                 )],
                 build.var(c),
               ),
@@ -633,19 +653,13 @@ mod tests {
         (i, build.int(2)),
         (g, build.int(3)),
         (h, build.int(4)),
-        (
-          f,
-          build.funs([j, k, l, m], build.var(j)),
-        ),
+        (f, build.funs([j, k, l, m], build.var(j))),
       ],
       build.apps(
         build.var(f),
-        [ build.var(a)
-        , build.var(i)
-        , build.var(g)
-        , build.var(h)
-        ]
-      ));
+        [build.var(a), build.var(i), build.var(g), build.var(h)],
+      ),
+    );
 
     let ir = simplify(ast);
 

@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap};
-use types_rows::{self as ast, Ast, Evidence, TypedVar};
+use types_rows::{self as ast, Ast, Evidence, NodeId, TypedVar, TypesOutput};
 
 mod pretty;
 
@@ -801,6 +801,8 @@ struct LowerAst {
   types: LowerTypes,
   ev_to_var: HashMap<Evidence, Var>,
   solved: Vec<(Var, IR)>,
+  row_to_ev: HashMap<NodeId, Evidence>,
+  branch_to_ret_ty: HashMap<NodeId, ast::Type>,
 }
 
 impl LowerAst {
@@ -832,12 +834,7 @@ impl LowerAst {
               .fields
               .binary_search(field)
               .map(RowIndex::Left)
-              .or_else(|_| {
-                right
-                  .fields
-                  .binary_search(field)
-                  .map(RowIndex::Right)
-              })
+              .or_else(|_| right.fields.binary_search(field).map(RowIndex::Right))
               .expect("ICE: Invalid solved row combination.")
           })
           .collect::<Vec<_>>();
@@ -870,28 +867,31 @@ impl LowerAst {
 
   fn lower_ast(&mut self, ast: Ast<TypedVar>) -> IR {
     match ast {
-      Ast::Var(TypedVar(var, ty)) => IR::Var(Var::new(
+      Ast::Var(_, TypedVar(var, ty)) => IR::Var(Var::new(
         self.supply.supply_for(var),
         self.types.lower_ty(ty),
       )),
-      Ast::Int(i) => IR::Int(i),
-      Ast::Fun(TypedVar(var, ty), body) => {
+      Ast::Int(_, i) => IR::Int(i),
+      Ast::Fun(_, TypedVar(var, ty), body) => {
         let ir_ty = self.types.lower_ty(ty);
         let ir_var = self.supply.supply_for(var);
         let ir_body = self.lower_ast(*body);
         IR::fun(Var::new(ir_var, ir_ty), ir_body)
       }
-      Ast::App(fun, arg) => {
+      Ast::App(_, fun, arg) => {
         let ir_fun = self.lower_ast(*fun);
         let ir_arg = self.lower_ast(*arg);
         IR::app(ir_fun, ir_arg)
       }
       // Labels are only required for type checking.
       // We erase them in the IR.
-      Ast::Label(_, body) => self.lower_ast(*body),
-      Ast::Unlabel(body, _) => self.lower_ast(*body),
-      Ast::Concat(meta, left, right) => {
-        let param = meta
+      Ast::Label(_, _, body) => self.lower_ast(*body),
+      Ast::Unlabel(_, body, _) => self.lower_ast(*body),
+      Ast::Concat(id, left, right) => {
+        let param = self
+          .row_to_ev
+          .get(&id)
+          .cloned()
           .map(|ev| self.lookup_ev(ev))
           .expect("ICE: Concat AST node lacks an expected evidence");
 
@@ -900,8 +900,11 @@ impl LowerAst {
         let concat = IR::field(IR::Var(param), 0);
         IR::app(IR::app(concat, left), right)
       }
-      Ast::Project(meta, direction, body) => {
-        let param = meta
+      Ast::Project(id, direction, body) => {
+        let param = self
+          .row_to_ev
+          .get(&id)
+          .cloned()
           .map(|ev| self.lookup_ev(ev))
           .expect("ICE: Project AST node lacks an expected evidence");
 
@@ -913,18 +916,29 @@ impl LowerAst {
         let prj_direction = IR::field(IR::field(IR::Var(param), direction_field), 0);
         IR::app(prj_direction, term)
       }
-      Ast::Branch(meta, left, right) => {
-        let meta = meta.expect("ICE: Branch AST node lacks expected meta");
-        let param = self.lookup_ev(meta.evidence);
+      Ast::Branch(id, left, right) => {
+        let param = self
+          .row_to_ev
+          .get(&id)
+          .cloned()
+          .map(|ev| self.lookup_ev(ev))
+          .expect("ICE: Branch AST node lacks an expected evidence");
 
-        let ret_ty = self.types.lower_ty(meta.ty);
+        let ret_ty = self
+          .branch_to_ret_ty
+          .get(&id)
+          .map(|ty| self.types.lower_ty(ty.clone()))
+          .expect("ICE: Branch AST node lacks expected type");
+        let branch = IR::ty_app(IR::field(IR::Var(param), 1), TyApp::Ty(ret_ty));
         let left = self.lower_ast(*left);
         let right = self.lower_ast(*right);
-        let branch = IR::ty_app(IR::field(IR::Var(param), 1), TyApp::Ty(ret_ty));
         IR::app(IR::app(branch, left), right)
       }
-      Ast::Inject(meta, direction, body) => {
-        let param = meta
+      Ast::Inject(id, direction, body) => {
+        let param = self
+          .row_to_ev
+          .get(&id)
+          .cloned()
           .map(|ev| self.lookup_ev(ev))
           .expect("ICE: Inject AST node lacks an expected evidence");
 
@@ -940,8 +954,8 @@ impl LowerAst {
   }
 }
 
-fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
-  let lowered_scheme = lower_ty_scheme(scheme);
+fn lower(out: TypesOutput) -> (IR, Type) {
+  let lowered_scheme = lower_ty_scheme(out.scheme);
   let mut supply = VarSupply::default();
   let mut params = vec![];
   let ev_to_var = lowered_scheme
@@ -960,8 +974,10 @@ fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
     types: lowered_scheme.lower_types,
     ev_to_var,
     solved: vec![],
+    row_to_ev: out.row_to_ev,
+    branch_to_ret_ty: out.branch_to_ret_ty,
   };
-  let ir = lower_ast.lower_ast(ast);
+  let ir = lower_ast.lower_ast(out.typed_ast);
   let solved_ir = lower_ast
     .solved
     .into_iter()
@@ -991,135 +1007,110 @@ fn pretty_string<'a>(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use types_rows::{self as ast, type_infer, Ast};
+  use types_rows::{self as ast, builder::AstBuilder, type_infer, Ast};
 
   fn lower_test(ast: Ast<ast::Var>) -> (IR, Type) {
-    let (ast, scheme) = type_infer(ast).expect("Type inference to succeed");
-    lower(ast, scheme)
+    let out = type_infer(ast).expect("Type inference to succeed");
+    lower(out)
   }
 
   #[test]
   fn lower_int() {
-    let ast = Ast::Int(3);
+    let b = AstBuilder::default();
+    let ast = b.int(3);
 
     let (ir, ir_ty) = lower_test(ast);
 
-    assert_eq!(ir, IR::Int(3));
-    // Int
     assert_eq!(ir_ty, ir.type_of());
+
+    let expect_ir = expect_test::expect!["3"];
+    expect_ir.assert_eq(pretty_string(ir, 80).as_str());
+
+    let expect_ir_ty = expect_test::expect!["Int"];
+    expect_ir_ty.assert_eq(pretty_string(ir_ty, 80).as_str());
   }
 
   #[test]
   fn lower_id_fun() {
+    let b = AstBuilder::default();
     let x = ast::Var(0);
-    let ast = Ast::fun(x, Ast::Var(x));
+    let ast = b.fun(x, b.var(x));
 
     let (ir, ir_ty) = lower_test(ast);
 
-    let a = Type::Var(TypeVar(0));
-    let x = Var::new(VarId(0), a);
-    assert_eq!(ir, IR::ty_fun(Kind::Type, IR::fun(x.clone(), IR::Var(x))));
-    // forall(fun(Var(a), Var(a)))
     assert_eq!(ir_ty, ir.type_of());
+
+    let expect_ir = expect_test::expect![[r#"
+        (ty_fun [Type]
+          (fun [V0]
+            V0))"#]];
+    expect_ir.assert_eq(pretty_string(ir, 80).as_str());
+
+    let expect_ir_ty = expect_test::expect![[r#"
+        ty_fun [Type] .
+          T0 -> T0"#]];
+    expect_ir_ty.assert_eq(pretty_string(ir_ty, 80).as_str());
   }
 
   #[test]
   fn lower_k_combinator() {
+    let b = AstBuilder::default();
     let x = ast::Var(0);
     let y = ast::Var(1);
-    let ast = Ast::fun(x, Ast::fun(y, Ast::Var(x)));
+    let ast = b.funs([x, y], b.var(x));
 
     let (ir, ir_ty) = lower_test(ast);
 
-    let a = TypeVar(1);
-    let b = TypeVar(0);
-    let x = Var::new(VarId(0), Type::Var(a));
-    let y = Var::new(VarId(1), Type::Var(b));
-    assert_eq!(
-      ir,
-      IR::ty_fun(
-        Kind::Type,
-        IR::ty_fun(Kind::Type, IR::fun(x.clone(), IR::fun(y, IR::Var(x))))
-      )
-    );
-    // forall(forall(fun(Var(a), fun(Var(b), Var(a)))))
     assert_eq!(ir_ty, ir.type_of());
+
+    let expect_ir = expect_test::expect![[r#"
+        (ty_fun [Type Type]
+          (fun [V0, V1]
+            V0))"#]];
+    expect_ir.assert_eq(pretty_string(ir, 80).as_str());
+
+    let expect_ir_ty = expect_test::expect![[r#"
+        ty_fun [Type, Type] .
+          T1 -> T0 -> T1"#]];
+    expect_ir_ty.assert_eq(pretty_string(ir_ty, 80).as_str());
   }
 
   #[test]
   fn lower_s_combinator() {
+    let b = AstBuilder::default();
     let x = ast::Var(0);
     let y = ast::Var(1);
     let z = ast::Var(2);
-    let ast = Ast::fun(
-      x,
-      Ast::fun(
-        y,
-        Ast::fun(
-          z,
-          Ast::app(
-            Ast::app(Ast::Var(x), Ast::Var(z)),
-            Ast::app(Ast::Var(y), Ast::Var(z)),
-          ),
-        ),
-      ),
+    let ast = b.funs(
+      [x, y, z],
+      b.app(b.app(b.var(x), b.var(z)), b.app(b.var(y), b.var(z))),
     );
 
     let (ir, ir_ty) = lower_test(ast);
 
-    let a = TypeVar(2);
-    let b = TypeVar(1);
-    let c = TypeVar(0);
-    let x = Var::new(
-      VarId(0),
-      Type::funs([Type::Var(a), Type::Var(b)], Type::Var(c)),
-    );
-    let y = Var::new(VarId(1), Type::fun(Type::Var(a), Type::Var(b)));
-    let z = Var::new(VarId(2), Type::Var(a));
-    assert_eq!(
-      ir,
-      IR::ty_fun(
-        Kind::Type,
-        IR::ty_fun(
-          Kind::Type,
-          IR::ty_fun(
-            Kind::Type,
-            IR::fun(
-              x.clone(),
-              IR::fun(
-                y.clone(),
-                IR::fun(
-                  z.clone(),
-                  IR::app(
-                    IR::app(IR::Var(x), IR::Var(z.clone())),
-                    IR::app(IR::Var(y), IR::Var(z))
-                  )
-                )
-              )
-            )
-          )
-        )
-      )
-    );
-    // forall(forall(forall(fun(fun(Var(a), fun(Var(b), Var(c))), fun(fun(Var(a), Var(b)), fun(Var(a), Var(c)))))))
     assert_eq!(ir_ty, ir.type_of());
+
+    let expect_ir = expect_test::expect![[r#"
+        (ty_fun [Type Type Type]
+          (fun [V0, V1, V2]
+            (V0 V2 (V1 V2))))"#]];
+    expect_ir.assert_eq(pretty_string(ir, 80).as_str());
+
+    let expect_ir_ty = expect_test::expect![[r#"
+        ty_fun [Type, Type, Type] .
+          (T2 -> T1 -> T0) -> (T2 -> T1) -> T2 -> T0"#]];
+    expect_ir_ty.assert_eq(pretty_string(ir_ty, 80).as_str());
   }
 
   #[test]
   fn lower_wand_combinator() {
-    let m = ast::Var(0);
-    let n = ast::Var(1);
-
-    let ast = Ast::fun(
-      m,
-      Ast::fun(
-        n,
-        Ast::unlabel(
-          Ast::project_(ast::Direction::Left, Ast::concat_(Ast::Var(m), Ast::Var(n))),
-          "x",
-        ),
-      ),
-    );
+    let b = AstBuilder::default();
+    let ast = b.make_funs(|[m, n]| {
+      b.unlabel(
+        b.project(ast::Direction::Left, b.concat(b.var(m), b.var(n))),
+        "x",
+      )
+    });
 
     let (ir, ir_ty) = lower_test(ast);
 
@@ -1136,16 +1127,16 @@ mod tests {
     expect_ir.assert_eq(&pretty_string(ir, 80));
 
     let expect_ty = expect_test::expect![[r#"
-        forall [Type] .
-          forall [Row, Row, Row, Row] .
+        ty_fun [Type] .
+          ty_fun [Row, Row, Row, Row] .
             { {T1} -> {T0} -> {T3}
-             , forall [Type] .
-               <T2> -> T0 -> <T1> -> T0 -> <T4> -> T0
+             , ty_fun [Type] .
+               (<T2> -> T0) -> (<T1> -> T0) -> <T4> -> T0
              , {{T3} -> {T1}, <T1> -> <T3>}
              , {{T3} -> {T0}, <T0> -> <T3>}
             } -> { T4 -> {T2} -> {T3}
-                  , forall [Type] .
-                    T5 -> T0 -> <T3> -> T0 -> <T4> -> T0
+                  , ty_fun [Type] .
+                    (T5 -> T0) -> (<T3> -> T0) -> <T4> -> T0
                   , {{T3} -> T4, T4 -> <T3>}
                   , {{T3} -> {T2}, <T2> -> <T3>}
             } -> {T1} -> {T0} -> T4"#]];
@@ -1155,12 +1146,10 @@ mod tests {
   #[test]
   fn lower_big_product() {
     let m = ast::Var(0);
-    let ast = Ast::concat_(
-      Ast::concat_(Ast::label("x", Ast::Int(1)), Ast::label("y", Ast::Int(2))),
-      Ast::concat_(
-        Ast::label("a", Ast::fun(m, Ast::Var(m))),
-        Ast::label("z", Ast::Int(3)),
-      ),
+    let b = AstBuilder::default();
+    let ast = b.concat(
+      b.concat(b.label("x", b.int(1)), b.label("y", b.int(2))),
+      b.concat(b.label("a", b.fun(m, b.var(m))), b.label("z", b.int(3)))
     );
 
     let (ir, ir_ty) = lower_test(ast);
@@ -1226,25 +1215,23 @@ mod tests {
 
     // How can so much IR make such small type.
     let expect_ty = expect_test::expect![[r#"
-        forall [Type] .
+        ty_fun [Type] .
           {T0 -> T0, Int, Int, Int}"#]];
     expect_ty.assert_eq(&pretty_string(ir_ty, 80));
   }
 
   #[test]
   fn lower_big_sum() {
-    let ast = Ast::branch_(
-      Ast::branch_(
-        Ast::fun(ast::Var(0), Ast::unlabel(Ast::Var(ast::Var(0)), "x")),
-        Ast::fun(ast::Var(1), Ast::unlabel(Ast::Var(ast::Var(1)), "y")),
+    let b = AstBuilder::default();
+    let ast = b.branch(
+      b.branch(
+        b.fun(ast::Var(0), b.unlabel(b.var(ast::Var(0)), "x")),
+        b.fun(ast::Var(1), b.unlabel(b.var(ast::Var(1)), "y"))
       ),
-      Ast::branch_(
-        Ast::fun(
-          ast::Var(2),
-          Ast::app(Ast::unlabel(Ast::Var(ast::Var(2)), "a"), Ast::Int(1)),
-        ),
-        Ast::fun(ast::Var(3), Ast::unlabel(Ast::Var(ast::Var(3)), "z")),
-      ),
+      b.branch(
+        b.fun(ast::Var(2), b.app(b.unlabel(b.var(ast::Var(2)), "a"), b.int(1))), 
+        b.fun(ast::Var(3), b.unlabel(b.var(ast::Var(3)), "z"))
+      )
     );
 
     let (ir, ir_ty) = lower_test(ast);
@@ -1315,7 +1302,7 @@ mod tests {
     expect_ir.assert_eq(&pretty_string(ir, 80));
 
     let expect_ty = expect_test::expect![[r#"
-        forall [Type] .
+        ty_fun [Type] .
           <Int -> T0, T0, T0, T0> -> T0"#]];
     expect_ty.assert_eq(&pretty_string(ir_ty, 80));
   }

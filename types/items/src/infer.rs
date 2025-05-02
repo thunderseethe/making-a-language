@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::ops::Deref;
 
-use crate::ast::{Ast, BranchMeta, Direction, ItemWrapper, TypedVar, Var};
+use crate::ast::{Ast, Direction, ItemWrapper, TypedVar, Var};
 use crate::inst::Instantiate;
 use crate::ty::{Row, RowCombination, RowUniVar, Type, TypeUniVar};
 use crate::{Constraint, Evidence, TypeInference};
@@ -54,27 +54,27 @@ impl TypeInference {
   /// constraints hold.
   pub(crate) fn infer(&mut self, env: im::HashMap<Var, Type>, ast: Ast<Var>) -> (InferOut, Type) {
     match ast {
-      Ast::Int(i) => (InferOut::new(vec![], Ast::Int(i)), Type::Int),
-      Ast::Var(v) => {
+      Ast::Int(id, i) => (InferOut::new(vec![], Ast::Int(id, i)), Type::Int),
+      Ast::Var(id, v) => {
         let ty = &env[&v];
         (
-          InferOut::new(vec![], Ast::Var(TypedVar(v, ty.clone()))),
+          InferOut::new(vec![], Ast::Var(id, TypedVar(v, ty.clone()))),
           ty.clone(),
         )
       }
-      Ast::Fun(arg, body) => {
+      Ast::Fun(id, arg, body) => {
         let arg_ty_var = self.fresh_ty_var();
         let env = env.update(arg, Type::Unifier(arg_ty_var));
         let (body_out, body_ty) = self.infer(env, *body);
         (
           InferOut {
-            typed_ast: Ast::fun(TypedVar(arg, Type::Unifier(arg_ty_var)), body_out.typed_ast),
+            typed_ast: Ast::fun(id, TypedVar(arg, Type::Unifier(arg_ty_var)), body_out.typed_ast),
             ..body_out
           },
           Type::fun(Type::Unifier(arg_ty_var), body_ty),
         )
       }
-      Ast::App(fun, arg) => {
+      Ast::App(id, fun, arg) => {
         let (arg_out, arg_ty) = self.infer(env.clone(), *arg);
 
         let ret_ty = Type::Unifier(self.fresh_ty_var());
@@ -89,29 +89,29 @@ impl TypeInference {
               .into_iter()
               .chain(fun_out.constraints)
               .collect(),
-            Ast::app(fun_out.typed_ast, arg_out.typed_ast),
+            Ast::app(id, fun_out.typed_ast, arg_out.typed_ast),
           ),
           ret_ty,
         )
       }
       // Labeling
-      Ast::Label(label, value) => {
+      Ast::Label(id, label, value) => {
         let (out, value_ty) = self.infer(env, *value);
         (
-          out.with_typed_ast(|ast| Ast::label(label.clone(), ast)),
+          out.with_typed_ast(|ast| Ast::label(id, label.clone(), ast)),
           Type::label(label, value_ty),
         )
       }
-      Ast::Unlabel(value, label) => {
+      Ast::Unlabel(id, value, label) => {
         let value_var = self.fresh_ty_var();
-        let expected_ty = Type::label(label, Type::Unifier(value_var));
-        (
-          self.check(env, *value, expected_ty),
-          Type::Unifier(value_var),
+        let expected_ty = Type::label(label.clone(), Type::Unifier(value_var));
+        let out = self.check(env, *value, expected_ty);
+        ( out.with_typed_ast(|ast| Ast::unlabel(id, ast, label))
+        , Type::Unifier(value_var)
         )
       }
       // Products
-      Ast::Concat(_, left, right) => {
+      Ast::Concat(id, left, right) => {
         let row_comb = self.fresh_row_combination();
 
         // Concat combines two smaller rows into a larger row.
@@ -125,17 +125,24 @@ impl TypeInference {
         let mut constraints = left_out.constraints;
         constraints.extend(right_out.constraints);
         // Add a new constraint for our row combination to solve concat
-        constraints.push(Constraint::RowCombine(row_comb.clone()));
+        constraints.push(Constraint::RowCombine(id, row_comb.clone()));
+        self.row_to_ev.insert(id, row_comb);
+
+        let typed_ast = Ast::concat(
+          id, 
+          left_out.typed_ast,
+          right_out.typed_ast,
+        );
 
         (
           InferOut {
             constraints,
-            typed_ast: Ast::concat(row_comb.into_evidence(), left_out.typed_ast, right_out.typed_ast),
+            typed_ast,
           },
           out_ty,
         )
       }
-      Ast::Project(_, dir, goal) => {
+      Ast::Project(id, dir, goal) => {
         let row_comb = self.fresh_row_combination();
         // Based on the direction of our projection,
         // our output row is either left or right
@@ -147,15 +154,18 @@ impl TypeInference {
         // node against our goal row (not our sub_row)
         let mut out = self.check(env, *goal, Type::Prod(row_comb.goal.clone()));
         // Add our row combination constraint to solve our projection
-        out.constraints.push(Constraint::RowCombine(row_comb.clone()));
+        out
+          .constraints
+          .push(Constraint::RowCombine(id, row_comb.clone()));
+        self.row_to_ev.insert(id, row_comb);
         (
-          out.with_typed_ast(|ast| Ast::project(row_comb.into_evidence(), dir, ast)),
+          out.with_typed_ast(|ast| Ast::project(id, dir, ast)),
           // Our sub row is the output type of the projection
           Type::Prod(sub_row),
         )
       }
       // Sums
-      Ast::Branch(_, left, right) => {
+      Ast::Branch(id, left, right) => {
         let row_comb = self.fresh_row_combination();
         let ret_ty = self.fresh_ty_var();
 
@@ -180,17 +190,23 @@ impl TypeInference {
         // Collect all our constraints for our final output
         let mut constraints = left_out.constraints;
         constraints.extend(right_out.constraints);
-        constraints.push(Constraint::RowCombine(row_comb.clone()));
+        constraints.push(Constraint::RowCombine(id, row_comb.clone()));
+        self.row_to_ev.insert(id, row_comb);
+        self.branch_to_ret_ty.insert(id, Type::Unifier(ret_ty));
 
         (
           InferOut {
             constraints,
-            typed_ast: Ast::branch(BranchMeta { evidence: row_comb.into_evidence(), ty: Type::Unifier(ret_ty) }, left_out.typed_ast, right_out.typed_ast),
+            typed_ast: Ast::branch(
+              id,
+              left_out.typed_ast,
+              right_out.typed_ast,
+            ),
           },
           out_ty,
         )
       }
-      Ast::Inject(_, dir, value) => {
+      Ast::Inject(id, dir, value) => {
         let row_comb = self.fresh_row_combination();
         // Like project, inject works in terms of sub rows and goal rows.
         // But inject is _injecting_ a smaller row into a bigger row.
@@ -202,14 +218,17 @@ impl TypeInference {
         let out_ty = Type::Sum(row_comb.goal.clone());
         // Because of this our sub row is the type of our value
         let mut out = self.check(env, *value, Type::Sum(sub_row));
-        out.constraints.push(Constraint::RowCombine(row_comb.clone()));
+        out
+          .constraints
+          .push(Constraint::RowCombine(id, row_comb.clone()));
+        self.row_to_ev.insert(id, row_comb);
         (
-          out.with_typed_ast(|ast| Ast::inject(row_comb.into_evidence(), dir, ast)),
+          out.with_typed_ast(|ast| Ast::inject(id, dir, ast)),
           // Our goal row is the type of our output
           out_ty,
         )
       }
-      Ast::Item(_, item_id) => {
+      Ast::Item(id, item_id) => {
         let ty_scheme = self.item_source.type_of_item(item_id);
 
         // Create fresh unifiers for each type and row variable in our type scheme.
@@ -238,7 +257,7 @@ impl TypeInference {
         // After this we'll have a list of constraints and a type that only reference the fresh
         // unfiers.
         let (constraints, ty) =
-          Instantiate::new(&tyvar_to_unifiers, &rowvar_to_unifiers).type_scheme(ty_scheme);
+          Instantiate::new(id, &tyvar_to_unifiers, &rowvar_to_unifiers).type_scheme(ty_scheme);
         let wrapper = ItemWrapper {
           types: wrapper_tyvars,
           rows: wrapper_rowvars,
@@ -246,7 +265,7 @@ impl TypeInference {
             .clone()
             .into_iter()
             .filter_map(|c| match c {
-              Constraint::RowCombine(row_combo) => Some(Evidence::RowEquation {
+              Constraint::RowCombine(_, row_combo) => Some(Evidence::RowEquation {
                 left: row_combo.left,
                 right: row_combo.right,
                 goal: row_combo.goal,
@@ -255,29 +274,30 @@ impl TypeInference {
             })
             .collect(),
         };
+        self.item_wrappers.insert(id, wrapper);
         (
-          InferOut::new(constraints, Ast::Item(Some(wrapper), item_id)),
+          InferOut::new(constraints, Ast::Item(id, item_id)),
           ty,
         )
-      }
+      },
     }
   }
 
   pub(crate) fn check(&mut self, env: im::HashMap<Var, Type>, ast: Ast<Var>, ty: Type) -> InferOut {
     match (ast, ty) {
-      (Ast::Int(i), Type::Int) => InferOut::new(vec![], Ast::Int(i)),
-      (Ast::Fun(arg, body), Type::Fun(arg_ty, ret_ty)) => {
+      (Ast::Int(id, i), Type::Int) => InferOut::new(vec![], Ast::Int(id, i)),
+      (Ast::Fun(id, arg, body), Type::Fun(arg_ty, ret_ty)) => {
         let env = env.update(arg, *arg_ty.clone());
         self
           .check(env, *body, *ret_ty)
-          .with_typed_ast(|body| Ast::fun(TypedVar(arg, *arg_ty), body))
+          .with_typed_ast(|body| Ast::fun(id, TypedVar(arg, *arg_ty), body))
       }
-      (Ast::Label(ast_lbl, term), Type::Label(ty_lbl, ty)) if ast_lbl == ty_lbl => self
+      (Ast::Label(id, ast_lbl, term), Type::Label(ty_lbl, ty)) if ast_lbl == ty_lbl => self
         .check(env, *term, *ty)
-        .with_typed_ast(|term| Ast::label(ast_lbl, term)),
-      (Ast::Unlabel(term, lbl), ty) => self
+        .with_typed_ast(|term| Ast::label(id, ast_lbl, term)),
+      (Ast::Unlabel(id, term, lbl), ty) => self
         .check(env, *term, Type::label(lbl.clone(), ty))
-        .with_typed_ast(|term| Ast::unlabel(term, lbl)),
+        .with_typed_ast(|term| Ast::unlabel(id, term, lbl)),
       (ast @ Ast::Concat(_, _, _), Type::Label(lbl, ty))
       | (ast @ Ast::Project(_, _, _), Type::Label(lbl, ty)) => {
         // Cast a singleton row into a product
@@ -288,7 +308,7 @@ impl TypeInference {
         // Cast a singleton row into a sum
         self.check(env, ast, Type::Sum(Row::single(lbl, *ty)))
       }
-      (Ast::Concat(_, left, right), Type::Prod(goal_row)) => {
+      (Ast::Concat(id, left, right), Type::Prod(goal_row)) => {
         let left_row = Row::Unifier(self.fresh_row_var());
         let right_row = Row::Unifier(self.fresh_row_var());
 
@@ -302,14 +322,15 @@ impl TypeInference {
           right: right_row,
           goal: goal_row,
         };
-        constraints.push(Constraint::RowCombine(row_comb.clone()));
+        constraints.push(Constraint::RowCombine(id, row_comb.clone()));
+        self.row_to_ev.insert(id, row_comb);
 
         InferOut {
           constraints,
-          typed_ast: Ast::concat(row_comb.into_evidence(), left_out.typed_ast, right_out.typed_ast),
+          typed_ast: Ast::concat(id, left_out.typed_ast, right_out.typed_ast),
         }
       }
-      (Ast::Project(_, dir, goal), Type::Prod(sub_row)) => {
+      (Ast::Project(id, dir, goal), Type::Prod(sub_row)) => {
         let goal_row = Row::Unifier(self.fresh_row_var());
 
         let (left, right) = match dir {
@@ -323,17 +344,19 @@ impl TypeInference {
           right,
           goal: goal_row,
         };
-        out.constraints.push(Constraint::RowCombine(row_comb.clone()));
+        out.constraints.push(Constraint::RowCombine(id, row_comb.clone()));
+        self.row_to_ev.insert(id, row_comb);
 
-        out.with_typed_ast(|ast| Ast::project(row_comb.into_evidence(), dir, ast))
+        out.with_typed_ast(|ast| Ast::project(id, dir, ast))
       }
-      (Ast::Branch(_, left_ast, right_ast), Type::Fun(arg_ty, ret_ty)) => {
+      (Ast::Branch(id, left_ast, right_ast), Type::Fun(arg_ty, ret_ty)) => {
         let mut constraints = vec![];
         let goal = match arg_ty.deref() {
           Type::Sum(goal) => goal.clone(),
           _ => {
             let goal = self.fresh_row_var();
             constraints.push(Constraint::TypeEqual(
+              id,
               *arg_ty,
               Type::Sum(Row::Unifier(goal)),
             ));
@@ -357,20 +380,19 @@ impl TypeInference {
         constraints.extend(left_out.constraints);
         constraints.extend(right_out.constraints);
         let row_comb = RowCombination { left, right, goal };
-        constraints.push(Constraint::RowCombine(row_comb.clone()));
+        constraints.push(Constraint::RowCombine(id, row_comb.clone()));
+        self.row_to_ev.insert(id, row_comb);
+        self.branch_to_ret_ty.insert(id, *ret_ty);
 
         InferOut {
           constraints,
           typed_ast: Ast::branch(
-              BranchMeta {
-                evidence: row_comb.into_evidence(),
-                ty: *ret_ty,
-              },
+              id,
               left_out.typed_ast, 
               right_out.typed_ast),
         }
       }
-      (Ast::Inject(_, dir, value), Type::Sum(goal)) => {
+      (Ast::Inject(id, dir, value), Type::Sum(goal)) => {
         let sub_row = self.fresh_row_var();
         let mut out = self.check(env, *value, Type::Sum(Row::Unifier(sub_row)));
         let (left, right) = match dir {
@@ -382,14 +404,15 @@ impl TypeInference {
           right: Row::Unifier(right),
           goal,
         };
-        out.constraints.push(Constraint::RowCombine(row_comb.clone()));
-        out.with_typed_ast(|ast| Ast::inject(row_comb.into_evidence(), dir, ast))
+        out.constraints.push(Constraint::RowCombine(id, row_comb.clone()));
+        out.with_typed_ast(|ast| Ast::inject(id, dir, ast))
       }
       (ast, expected_ty) => {
+        let id = ast.id();
         let (mut out, actual_ty) = self.infer(env, ast);
         out
           .constraints
-          .push(Constraint::TypeEqual(expected_ty, actual_ty));
+          .push(Constraint::TypeEqual(id, expected_ty, actual_ty));
         out
       }
     }

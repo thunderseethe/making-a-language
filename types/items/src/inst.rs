@@ -1,18 +1,22 @@
 use std::collections::HashMap;
 
+use crate::ast::NodeId;
 use crate::ty::{Row, RowCombination, RowUniVar, RowVar, Type, TypeUniVar, TypeVar};
 use crate::{Constraint, Evidence, TypeScheme};
 
 pub(crate) struct Instantiate<'a> {
+  id: NodeId,
   tyvar_to_unifiers: &'a HashMap<TypeVar, TypeUniVar>,
   rowvar_to_unifiers: &'a HashMap<RowVar, RowUniVar>,
 }
 impl<'a> Instantiate<'a> {
   pub(crate) fn new(
+    id: NodeId,
     tyvar_to_unifiers: &'a HashMap<TypeVar, TypeUniVar>,
     rowvar_to_unifiers: &'a HashMap<RowVar, RowUniVar>,
   ) -> Self {
     Self {
+      id,
       tyvar_to_unifiers,
       rowvar_to_unifiers,
     }
@@ -30,7 +34,7 @@ impl<'a> Instantiate<'a> {
 
   fn evidence(&self, ev: Evidence) -> Constraint {
     match ev {
-      Evidence::RowEquation { left, right, goal } => Constraint::RowCombine(RowCombination {
+      Evidence::RowEquation { left, right, goal } => Constraint::RowCombine(self.id, RowCombination {
         left: self.row(left),
         right: self.row(right),
         goal: self.row(goal),

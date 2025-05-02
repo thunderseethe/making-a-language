@@ -3,13 +3,14 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use ena::unify::InPlaceUnificationTable;
 
-pub use self::ast::{Ast, Direction, ItemId, TypedVar, Var};
+pub use self::ast::{Ast, Direction, ItemId, TypedVar, Var, NodeId, ItemWrapper};
 use self::subst::SubstOut;
 pub use self::ty::{ClosedRow, Row, RowCombination, RowVar, Type, TypeVar};
 use self::ty::{RowUniVar, TypeUniVar};
-use self::unification::TypeError;
+use self::unification::{TypeError, TypeErrorKind};
 
 mod ast;
+pub mod builder;
 mod infer;
 mod inst;
 mod subst;
@@ -20,8 +21,8 @@ mod unification;
 /// Right now this is just type equality but it will be more substantial later
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum Constraint {
-  TypeEqual(Type, Type),
-  RowCombine(RowCombination),
+  TypeEqual(NodeId, Type, Type),
+  RowCombine(NodeId, RowCombination),
 }
 
 /// Responsible for all the metadata our type checker wants about Items.
@@ -63,6 +64,10 @@ pub struct TypeInference {
   partial_row_combs: BTreeSet<RowCombination>,
   item_source: ItemSource,
 
+  row_to_ev: HashMap<NodeId, RowCombination>,
+  branch_to_ret_ty: HashMap<NodeId, Type>,
+
+  item_wrappers: HashMap<NodeId, ItemWrapper>,
   subst_unifiers_to_tyvars: HashMap<TypeUniVar, TypeVar>,
   next_tyvar: u32,
   subst_unifiers_to_rowvars: HashMap<RowUniVar, RowVar>,
@@ -112,10 +117,19 @@ pub struct TypeScheme {
   pub ty: Type,
 }
 
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct TypesOutput {
+  pub typed_ast: Ast<TypedVar>,
+  pub scheme: TypeScheme,
+  pub row_to_ev: HashMap<NodeId, Evidence>,
+  pub branch_to_ret_ty: HashMap<NodeId, Type>,
+  pub item_wrappers: HashMap<NodeId, ItemWrapper>,
+}
+
 pub fn type_infer_with_items(
   item_source: ItemSource,
   ast: Ast<Var>,
-) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
+) -> Result<TypesOutput, TypeError> {
   let mut ctx = TypeInference {
     item_source,
     ..Default::default()
@@ -132,22 +146,52 @@ pub fn type_infer_with_items(
     .substitute_ty(ty)
     .merge(ctx.substitute_ast(out.typed_ast), |ty, ast| (ty, ast));
 
-  let evidence_subst = ctx.normalize_mentioned_row_combs(subst_out);
+  let mut evidence_subst = ctx.normalize_mentioned_row_combs(subst_out);
+  let row_to_ev = std::mem::take(&mut ctx.row_to_ev)
+    .into_iter()
+    .map(|(id, combo)| {
+      let out = ctx.substitute_row_comb(combo);
+      evidence_subst.unbound_rows.extend(out.unbound_rows);
+      evidence_subst.unbound_tys.extend(out.unbound_tys);
+      (id, out.value)
+    })
+    .collect();
+  let item_wrappers = std::mem::take(&mut ctx.item_wrappers)
+    .into_iter()
+    .map(|(id, wrapper)| {
+      let out = ctx.substitute_wrapper(wrapper);
+      evidence_subst.unbound_rows.extend(out.unbound_rows);
+      evidence_subst.unbound_tys.extend(out.unbound_tys);
+      (id, out.value)
+    })
+    .collect();
+  let branch_to_ret_ty = std::mem::take(&mut ctx.branch_to_ret_ty)
+    .into_iter()
+    .map(|(id, ty)| {
+      let out = ctx.substitute_ty(ty);
+      evidence_subst.unbound_rows.extend(out.unbound_rows);
+      evidence_subst.unbound_tys.extend(out.unbound_tys);
+      (id, out.value)
+    })
+    .collect();
 
   // Return our typed ast and it's type scheme
   let ((ty, ast), evidence) = evidence_subst.value;
-  Ok((
-    ast,
-    TypeScheme {
+  Ok(TypesOutput {
+    typed_ast: ast,
+    scheme: TypeScheme {
       unbound_rows: evidence_subst.unbound_rows,
       unbound_tys: evidence_subst.unbound_tys,
       evidence,
       ty,
     },
-  ))
+    row_to_ev,
+    branch_to_ret_ty,
+    item_wrappers,
+  })
 }
 
-pub fn type_infer(ast: Ast<Var>) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
+pub fn type_infer(ast: Ast<Var>) -> Result<TypesOutput, TypeError> {
   type_infer_with_items(ItemSource::default(), ast)
 }
 
@@ -155,7 +199,7 @@ fn type_check_with_items(
   item_source: ItemSource,
   ast: Ast<Var>,
   signature: TypeScheme,
-) -> Result<Ast<TypedVar>, TypeError> {
+) -> Result<TypesOutput, TypeError> {
   let mut ctx = TypeInference {
     item_source,
     next_tyvar: signature
@@ -173,18 +217,22 @@ fn type_check_with_items(
     ..Default::default()
   };
 
+  let id = ast.id();
   // Constraint generation
-  let mut out = ctx.check(im::HashMap::default(), ast, signature.ty);
+  let mut out = ctx.check(im::HashMap::default(), ast, signature.ty.clone());
 
   // Add any evidence in our type annotation to be used during solving
   out
     .constraints
     .extend(signature.evidence.iter().map(|ev| match ev {
-      Evidence::RowEquation { left, right, goal } => Constraint::RowCombine(RowCombination {
-        left: left.clone(),
-        right: right.clone(),
-        goal: goal.clone(),
-      }),
+      Evidence::RowEquation { left, right, goal } => Constraint::RowCombine(
+        id,
+        RowCombination {
+          left: left.clone(),
+          right: right.clone(),
+          goal: goal.clone(),
+        },
+      ),
     }));
 
   // Constraint solving
@@ -195,39 +243,75 @@ fn type_check_with_items(
 
   // Here we have to make sure we didn't invent new constraints or types
   // during unification, and if we did that's an error.
-  let evidence_subst = ctx.normalize_mentioned_row_combs(subst_out);
+  let mut evidence_subst = ctx.normalize_mentioned_row_combs(subst_out);
+  let row_to_ev = std::mem::take(&mut ctx.row_to_ev)
+    .into_iter()
+    .map(|(id, combo)| {
+      let out = ctx.substitute_row_comb(combo);
+      evidence_subst.unbound_rows.extend(out.unbound_rows);
+      evidence_subst.unbound_tys.extend(out.unbound_tys);
+      (id, out.value)
+    })
+    .collect();
+  let item_wrappers = std::mem::take(&mut ctx.item_wrappers)
+    .into_iter()
+    .map(|(id, wrapper)| {
+      let out = ctx.substitute_wrapper(wrapper);
+      evidence_subst.unbound_rows.extend(out.unbound_rows);
+      evidence_subst.unbound_tys.extend(out.unbound_tys);
+      (id, out.value)
+    })
+    .collect();
+  let branch_to_ret_ty = std::mem::take(&mut ctx.branch_to_ret_ty)
+    .into_iter()
+    .map(|(id, ty)| {
+      let out = ctx.substitute_ty(ty);
+      evidence_subst.unbound_rows.extend(out.unbound_rows);
+      evidence_subst.unbound_tys.extend(out.unbound_tys);
+      (id, out.value)
+    })
+    .collect();
   let (ast, evs) = evidence_subst.value;
 
-  let new_tys = evidence_subst
+  let extra_types = evidence_subst
     .unbound_tys
     .difference(&signature.unbound_tys)
     .copied()
     .collect::<Vec<_>>();
-  let new_rows = evidence_subst
+  let extra_row = evidence_subst
     .unbound_rows
     .difference(&signature.unbound_rows)
     .copied()
     .collect::<Vec<_>>();
 
-  let sig_evs = signature.evidence.into_iter().collect::<HashSet<_>>();
-  let new_evidence = evs
+  let sig_evs = signature.evidence.iter().cloned().collect::<HashSet<_>>();
+  let extra_evidence = evs
     .into_iter()
     .collect::<HashSet<_>>()
     .difference(&sig_evs)
     .cloned()
     .collect::<Vec<_>>();
-  if !new_tys.is_empty() || !new_rows.is_empty() || !new_evidence.is_empty() {
-    return Err(TypeError::CheckIntroducedExtraVariablesOrConstraints {
-      extra_types: new_tys,
-      extra_row: new_rows,
-      extra_evidence: new_evidence,
+  if !extra_types.is_empty() || !extra_row.is_empty() || !extra_evidence.is_empty() {
+    return Err(TypeError {
+      kind: TypeErrorKind::CheckIntroducedExtraVariablesOrConstraints {
+        extra_types,
+        extra_row,
+        extra_evidence,
+      },
+      node_id: id,
     });
   }
 
-  Ok(ast)
+  Ok(TypesOutput {
+    typed_ast: ast,
+    scheme: signature,
+    row_to_ev,
+    branch_to_ret_ty,
+    item_wrappers,
+  })
 }
 
-fn type_check(ast: Ast<Var>, signature: TypeScheme) -> Result<Ast<TypedVar>, TypeError> {
+fn type_check(ast: Ast<Var>, signature: TypeScheme) -> Result<TypesOutput, TypeError> {
   type_check_with_items(ItemSource::default(), ast, signature)
 }
 
@@ -235,6 +319,8 @@ fn type_check(ast: Ast<Var>, signature: TypeScheme) -> Result<Ast<TypedVar>, Typ
 mod tests {
   use crate::ast::Direction;
   use crate::ty::ClosedRow;
+
+  use self::builder::AstBuilder;
 
   use super::*;
 
@@ -251,28 +337,33 @@ mod tests {
 
   #[test]
   fn infers_int() {
-    let ast = Ast::Int(3);
+    let b = AstBuilder::default();
+    let ast = b.int(3);
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
-    assert_eq!(ty_chk.0, Ast::Int(3));
-    assert_eq!(ty_chk.1.ty, Type::Int);
+    assert_eq!(ty_chk.typed_ast, Ast::Int(NodeId(0), 3));
+    assert_eq!(ty_chk.scheme.ty, Type::Int);
   }
 
   #[test]
   fn infers_id_fun() {
     let x = Var(0);
-    let ast = Ast::fun(x, Ast::Var(x));
+    let b = AstBuilder::default();
+    let ast = b.fun(x, b.var(x));
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
 
     let a = TypeVar(0);
     let typed_x = TypedVar(x, Type::Var(a));
-    assert_eq!(ty_chk.0, Ast::fun(typed_x.clone(), Ast::Var(typed_x)));
     assert_eq!(
-      ty_chk.1,
+      ty_chk.typed_ast,
+      Ast::fun(NodeId(1), typed_x.clone(), Ast::Var(NodeId(0), typed_x))
+    );
+    assert_eq!(
+      ty_chk.scheme,
       TypeScheme {
-        unbound_rows: set![],
         unbound_tys: set![a],
+        unbound_rows: set![],
         evidence: vec![],
         ty: Type::fun(Type::Var(a), Type::Var(a)),
       }
@@ -283,17 +374,18 @@ mod tests {
   fn infers_k_combinator() {
     let x = Var(0);
     let y = Var(1);
-    let ast = Ast::fun(x, Ast::fun(y, Ast::Var(x)));
+    let b = AstBuilder::default();
+    let ast = b.funs([x, y], b.var(x));
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
 
     let a = TypeVar(0);
     let b = TypeVar(1);
     assert_eq!(
-      ty_chk.1,
+      ty_chk.scheme,
       TypeScheme {
-        unbound_rows: set![],
         unbound_tys: set![a, b],
+        unbound_rows: set![],
         evidence: vec![],
         ty: Type::fun(Type::Var(a), Type::fun(Type::Var(b), Type::Var(a))),
       }
@@ -305,18 +397,10 @@ mod tests {
     let x = Var(0);
     let y = Var(1);
     let z = Var(2);
-    let ast = Ast::fun(
-      x,
-      Ast::fun(
-        y,
-        Ast::fun(
-          z,
-          Ast::app(
-            Ast::app(Ast::Var(x), Ast::Var(z)),
-            Ast::app(Ast::Var(y), Ast::Var(z)),
-          ),
-        ),
-      ),
+    let b = AstBuilder::default();
+    let ast = b.funs(
+      [x, y, z],
+      b.app(b.app(b.var(x), b.var(z)), b.app(b.var(y), b.var(z))),
     );
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
@@ -327,14 +411,31 @@ mod tests {
     let x_ty = Type::fun(Type::Var(a), Type::fun(Type::Var(b), Type::Var(c)));
     let y_ty = Type::fun(Type::Var(a), Type::Var(b));
     assert_eq!(
-      ty_chk.1,
+      ty_chk.scheme,
       TypeScheme {
-        unbound_rows: set![],
         unbound_tys: set![a, b, c],
+        unbound_rows: set![],
         evidence: vec![],
         ty: Type::fun(x_ty, Type::fun(y_ty, Type::fun(Type::Var(a), Type::Var(c)))),
       }
     )
+  }
+
+  #[test]
+  fn type_infer_fails() {
+    let x = Var(0);
+    let b = AstBuilder::default();
+    let ast = b.locals([(x, b.int(1))], b.app(b.var(x), b.int(3)));
+
+    let ty_chk_res = type_infer(ast);
+
+    assert_eq!(
+      ty_chk_res,
+      Err(TypeError {
+        kind: TypeErrorKind::TypeNotEqual((Type::fun(Type::Int, Type::Unifier(TypeUniVar { id: 1 })), Type::Int)),
+        node_id: NodeId(1)
+      })
+    );
   }
 
   fn single_row(field: impl ToString, value: Type) -> ClosedRow {
@@ -346,30 +447,24 @@ mod tests {
 
   #[test]
   fn test_wand_combinator() {
-    let m = Var(0);
-    let n = Var(1);
-
-    let ast = Ast::fun(
-      m,
-      Ast::fun(
-        n,
-        Ast::unlabel(
-          Ast::project_(Direction::Left, Ast::concat_(Ast::Var(m), Ast::Var(n))),
-          "x",
-        ),
-      ),
-    );
+    let b = AstBuilder::default();
+    let ast = b.make_funs(|[m, n]| {
+      b.unlabel(
+        b.project(Direction::Left, b.concat(b.var(m), b.var(n))),
+        "x",
+      )
+    });
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
 
     let m = RowVar(0);
     let n = RowVar(1);
-    let goal = RowVar(3);
+    let goal = RowVar(2);
     let a = TypeVar(0);
     assert_eq!(
-      ty_chk.1,
+      ty_chk.scheme,
       TypeScheme {
-        unbound_rows: set![n, RowVar(2), m, goal],
+        unbound_rows: set![n, RowVar(3), m, goal],
         unbound_tys: set![a],
         evidence: vec![
           Evidence::RowEquation {
@@ -379,7 +474,7 @@ mod tests {
           },
           Evidence::RowEquation {
             left: Row::Closed(single_row("x", Type::Var(a))),
-            right: Row::Open(RowVar(2)),
+            right: Row::Open(RowVar(3)),
             goal: Row::Open(goal)
           }
         ],
@@ -393,37 +488,28 @@ mod tests {
 
   #[test]
   fn test_sums() {
-    let f = Var(0);
-    let g = Var(1);
-    let x = Var(2);
-    let ast = Ast::fun(
-      f,
-      Ast::fun(
-        g,
-        Ast::fun(
-          x,
-          Ast::app(
-            Ast::branch_(Ast::Var(f), Ast::Var(g)),
-            Ast::inject_(Direction::Right, Ast::label("Con", Ast::Var(x))),
-          ),
-        ),
-      ),
-    );
-
+    let b = AstBuilder::default();
+    let ast = b.make_funs(|[f, g, x]| {
+      b.app(
+        b.branch(b.var(f), b.var(g)),
+        b.inject(Direction::Right, b.label("Con", b.var(x))),
+      )
+    });
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
 
     let f = RowVar(0);
     let g = RowVar(1);
-    let goal = RowVar(2);
+    let goal = RowVar(3);
     let a = TypeVar(1);
     let r = TypeVar(0);
     assert_eq!(
+      ty_chk.scheme,
       TypeScheme {
-        unbound_rows: set![g, f, RowVar(3), goal],
+        unbound_rows: set![g, f, RowVar(2), goal],
         unbound_tys: set![a, r],
         evidence: vec![
           Evidence::RowEquation {
-            left: Row::Open(RowVar(3)),
+            left: Row::Open(RowVar(2)),
             right: Row::Closed(single_row("Con", Type::Var(a))),
             goal: Row::Open(goal)
           },
@@ -440,26 +526,20 @@ mod tests {
             Type::fun(Type::Var(a), Type::Var(r))
           )
         ),
-      },
-      ty_chk.1,
+      }
     );
   }
 
   #[test]
   fn type_check_items() {
-    let m = Var(0);
-    let n = Var(1);
-
-    let ast = Ast::fun(
-      m,
-      Ast::fun(
-        n,
-        Ast::unlabel(
-          Ast::project_(Direction::Left, Ast::concat_(Ast::Var(m), Ast::Var(n))),
-          "x",
-        ),
-      ),
-    );
+    let b = AstBuilder::default();
+    let ast = b.make_funs(|[m, n]| {
+      b.unlabel(
+        b.project(Direction::Left, 
+          b.concat(b.var(m), b.var(n))),
+        "x",
+      )
+    });
 
     let r = RowVar(0);
     let s = RowVar(1);
@@ -495,9 +575,10 @@ mod tests {
   fn type_check_item_fails() {
     let a = TypeVar(0);
 
-    let x = Var(0);
-    let y = Var(1);
-    let ast = Ast::fun(x, Ast::fun(y, Ast::app(Ast::Var(y), Ast::Var(x))));
+    let b = AstBuilder::default();
+    let ast = b.make_funs(|[x, y]| {
+      b.app(b.var(y), b.var(x))
+    }); 
     let signature = TypeScheme {
       unbound_tys: set![a],
       unbound_rows: set![],
@@ -510,21 +591,26 @@ mod tests {
 
     let out = type_check(ast, signature);
 
-    assert_eq!(out, Err(TypeError::TypeNotEqual((Type::Var(a), Type::Int))));
+    assert_eq!(
+      out,
+      Err(TypeError {
+        kind: TypeErrorKind::TypeNotEqual((Type::Var(a), Type::Int)),
+        node_id: NodeId(0),
+      })
+    );
   }
 
   #[test]
   fn type_infer_partial_wand_item_app() {
     let wand = ItemId(0);
 
-    let m = Var(0);
-    let ast = Ast::fun(
-      m,
-      Ast::app(
-        Ast::app(Ast::Item(None, wand), Ast::Var(m)),
-        Ast::label("y", Ast::Int(3)),
-      ),
-    );
+    let b = AstBuilder::default();
+    let ast = b.make_funs(|[m]| {
+      b.app(
+        b.app(b.item(wand), b.var(m)),
+        b.label("y", b.int(3))
+      )
+    });
 
     let r = RowVar(0);
     let s = RowVar(1);
@@ -553,14 +639,14 @@ mod tests {
 
     let item_source = ItemSource::from_iter([(wand, wand_scheme)]);
 
-    let (_, scheme) =
+    let out =
       type_infer_with_items(item_source, ast).expect("Expected type inference to succeed");
 
     let y_unused = RowVar(0);
     let goal = RowVar(1);
     let x_unused = RowVar(2);
     assert_eq!(
-      scheme,
+      out.scheme,
       TypeScheme {
         unbound_rows: set![y_unused, goal, x_unused],
         unbound_tys: set![a],
@@ -578,22 +664,6 @@ mod tests {
         ],
         ty: Type::fun(Type::Prod(Row::Open(r)), Type::Var(a)),
       },
-    );
-  }
-
-  #[test]
-  fn type_infer_fails() {
-    let x = Var(0);
-    let ast = Ast::app(Ast::fun(x, Ast::app(Ast::Var(x), Ast::Int(3))), Ast::Int(1));
-
-    let ty_chk_res = type_infer(ast);
-
-    assert_eq!(
-      ty_chk_res,
-      Err(TypeError::TypeNotEqual((
-        Type::fun(Type::Int, Type::Unifier(TypeUniVar::new(1))),
-        Type::Int
-      )))
     );
   }
 }

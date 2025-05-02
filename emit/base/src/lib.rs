@@ -580,7 +580,7 @@ mod tests {
 
   fn wasm_module_of(ast: Ast<ast::Var>) -> Vec<u8> {
     let (ast, scheme) = type_infer(ast).expect("Type inferce failed");
-    let (ir, _, _) = lower(ast, scheme);
+    let (ir, _) = lower(ast, scheme);
     let out = closure_convert(trivial_monomorph(simplify(ir)));
 
     let main_defn = ItemId(

@@ -35,7 +35,6 @@ parser-base = { path = "parser/base" }
 desugar-base = { path = "desugar/base" }
 name-resolution-base = { path = "name_resolution/base" }
 compiler-base = { path = "compiler/base" }
-
 ena = "0.14.2"
 expect-test = "1.5.1"
 im = "15.1"

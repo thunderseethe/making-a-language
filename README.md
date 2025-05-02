@@ -14,3 +14,5 @@ The stages in the compiler:
   * [base](/lowering/base) - Lowering the AST of our base type checker.
   * [rows](/lowering/rows) - Lowering our rows type checker using evidence passing.
   * [items](/lowering/items) - Lowering top level items into our IR.
+* [simplify](/simplify) - Simplify our IR to improve its performance.
+  * [base](/simplify/base) - Simplifying our base IR.

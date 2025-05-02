@@ -1,14 +1,15 @@
 #![allow(dead_code)]
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 use ena::unify::InPlaceUnificationTable;
 
-pub use self::ast::{Ast, Direction, TypedVar, Var};
+pub use self::ast::{Ast, Direction, TypedVar, Var, NodeId};
 use self::subst::SubstOut;
 pub use self::ty::{ClosedRow, Row, RowCombination, RowVar, Type, TypeVar};
 use self::unification::TypeError;
 
 mod ast;
+pub mod builder;
 mod infer;
 mod subst;
 mod ty;
@@ -17,18 +18,21 @@ mod unification;
 /// Our constraints
 /// Right now this is just type equality but it will be more substantial later
 #[derive(Debug)]
-pub enum Constraint {
-  TypeEqual(Type, Type),
-  RowCombine(RowCombination),
+enum Constraint {
+  TypeEqual(NodeId, Type, Type),
+  RowCombine(NodeId, RowCombination),
 }
 
 /// Type inference
 /// This struct holds some commong state that will useful to share between our stages of type
 /// inference.
+#[derive(Default)]
 pub struct TypeInference {
   unification_table: InPlaceUnificationTable<TypeVar>,
   row_unification_table: InPlaceUnificationTable<RowVar>,
   partial_row_combs: BTreeSet<RowCombination>,
+  row_to_combo: HashMap<NodeId, RowCombination>,
+  branch_to_ret_ty: HashMap<NodeId, Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -44,13 +48,16 @@ pub struct TypeScheme {
   pub ty: Type,
 }
 
-pub fn type_infer(ast: Ast<Var>) -> Result<(Ast<TypedVar>, TypeScheme), TypeError> {
-  let mut ctx = TypeInference {
-    unification_table: InPlaceUnificationTable::default(),
-    row_unification_table: InPlaceUnificationTable::default(),
-    partial_row_combs: BTreeSet::default(),
-  };
+#[derive(PartialEq, Eq, Clone, Debug)]
+pub struct TypesOutput {
+  pub typed_ast: Ast<TypedVar>,
+  pub scheme: TypeScheme,
+  pub row_to_ev: HashMap<NodeId, Evidence>,
+  pub branch_to_ret_ty: HashMap<NodeId, Type>,
+}
 
+pub fn type_infer(ast: Ast<Var>) -> Result<TypesOutput, TypeError> {
+  let mut ctx = TypeInference::default();
   // Constraint generation
   let (out, ty) = ctx.infer(im::HashMap::default(), ast);
 
@@ -133,24 +140,44 @@ pub fn type_infer(ast: Ast<Var>) -> Result<(Ast<TypedVar>, TypeScheme), TypeErro
     })
     .collect();
 
+  let row_to_ev = std::mem::take(&mut ctx.row_to_combo).into_iter()
+        .map(|(id, combo)| {
+          let out = ctx.substitute_row_comb(combo);
+          ev_out.unbound_rows.extend(out.unbound_rows);
+          ev_out.unbound_tys.extend(out.unbound_tys);
+          (id, out.value)
+        })
+        .collect();
+  let branch_to_ret_ty = std::mem::take(&mut ctx.branch_to_ret_ty).into_iter()
+      .map(|(id, ty)| {
+        let out = ctx.substitute_ty(ty);
+        ev_out.unbound_rows.extend(out.unbound_rows);
+        ev_out.unbound_tys.extend(out.unbound_tys);
+        (id, out.value)
+      })
+      .collect();
   let subst_out = subst_out.merge(ev_out, |l, _| l);
   // Return our typed ast and it's type scheme
-  Ok((
-    subst_out.value.1,
-    TypeScheme {
+  Ok(TypesOutput {
+    typed_ast: subst_out.value.1,
+    scheme: TypeScheme {
       unbound_rows: subst_out.unbound_rows,
       unbound_tys: subst_out.unbound_tys,
       evidence,
       ty: subst_out.value.0,
     },
-  ))
+    row_to_ev,
+    branch_to_ret_ty
+  })
 }
 
 #[cfg(test)]
 mod tests {
-
   use crate::ast::Direction;
   use crate::ty::ClosedRow;
+
+  use self::builder::AstBuilder;
+  use self::unification::{TypeError, TypeErrorKind};
 
   use super::*;
 
@@ -165,28 +192,33 @@ mod tests {
 
   #[test]
   fn infers_int() {
-    let ast = Ast::Int(3);
+    let b = AstBuilder::default();
+    let ast = b.int(3);
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
-    assert_eq!(ty_chk.0, Ast::Int(3));
-    assert_eq!(ty_chk.1.ty, Type::Int);
+    assert_eq!(ty_chk.typed_ast, Ast::Int(NodeId(0), 3));
+    assert_eq!(ty_chk.scheme.ty, Type::Int);
   }
 
   #[test]
   fn infers_id_fun() {
     let x = Var(0);
-    let ast = Ast::fun(x, Ast::Var(x));
+    let b = AstBuilder::default();
+    let ast = b.fun(x, b.var(x));
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
 
     let a = TypeVar(0);
     let typed_x = TypedVar(x, Type::Var(a));
-    assert_eq!(ty_chk.0, Ast::fun(typed_x.clone(), Ast::Var(typed_x)));
     assert_eq!(
-      ty_chk.1,
+      ty_chk.typed_ast,
+      Ast::fun(NodeId(1), typed_x.clone(), Ast::Var(NodeId(0), typed_x))
+    );
+    assert_eq!(
+      ty_chk.scheme,
       TypeScheme {
-        unbound_rows: set![],
         unbound_tys: set![a],
+        unbound_rows: set![],
         evidence: vec![],
         ty: Type::fun(Type::Var(a), Type::Var(a)),
       }
@@ -197,17 +229,18 @@ mod tests {
   fn infers_k_combinator() {
     let x = Var(0);
     let y = Var(1);
-    let ast = Ast::fun(x, Ast::fun(y, Ast::Var(x)));
+    let b = AstBuilder::default();
+    let ast = b.funs([x, y], b.var(x));
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
 
     let a = TypeVar(0);
     let b = TypeVar(1);
     assert_eq!(
-      ty_chk.1,
+      ty_chk.scheme,
       TypeScheme {
-        unbound_rows: set![],
         unbound_tys: set![a, b],
+        unbound_rows: set![],
         evidence: vec![],
         ty: Type::fun(Type::Var(a), Type::fun(Type::Var(b), Type::Var(a))),
       }
@@ -219,18 +252,10 @@ mod tests {
     let x = Var(0);
     let y = Var(1);
     let z = Var(2);
-    let ast = Ast::fun(
-      x,
-      Ast::fun(
-        y,
-        Ast::fun(
-          z,
-          Ast::app(
-            Ast::app(Ast::Var(x), Ast::Var(z)),
-            Ast::app(Ast::Var(y), Ast::Var(z)),
-          ),
-        ),
-      ),
+    let b = AstBuilder::default();
+    let ast = b.funs(
+      [x, y, z],
+      b.app(b.app(b.var(x), b.var(z)), b.app(b.var(y), b.var(z))),
     );
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
@@ -241,14 +266,31 @@ mod tests {
     let x_ty = Type::fun(Type::Var(a), Type::fun(Type::Var(b), Type::Var(c)));
     let y_ty = Type::fun(Type::Var(a), Type::Var(b));
     assert_eq!(
-      ty_chk.1,
+      ty_chk.scheme ,
       TypeScheme {
-        unbound_rows: set![],
         unbound_tys: set![a, b, c],
+        unbound_rows: set![],
         evidence: vec![],
         ty: Type::fun(x_ty, Type::fun(y_ty, Type::fun(Type::Var(a), Type::Var(c)))),
       }
     )
+  }
+
+  #[test]
+  fn type_infer_fails() {
+    let x = Var(0);
+    let b = AstBuilder::default();
+    let ast = b.locals([(x, b.int(1))], b.app(b.var(x), b.int(3)));
+
+    let ty_chk_res = type_infer(ast);
+
+    assert_eq!(
+      ty_chk_res,
+      Err(TypeError {
+        kind: TypeErrorKind::TypeNotEqual((Type::fun(Type::Int, Type::Var(TypeVar(1))), Type::Int)),
+        node_id: NodeId(1)
+      })
+    );
   }
 
   fn single_row(field: impl ToString, value: Type) -> ClosedRow {
@@ -260,19 +302,13 @@ mod tests {
 
   #[test]
   fn test_wand_combinator() {
-    let m = Var(0);
-    let n = Var(1);
-
-    let ast = Ast::fun(
-      m,
-      Ast::fun(
-        n,
-        Ast::unlabel(
-          Ast::project_(Direction::Left, Ast::concat_(Ast::Var(m), Ast::Var(n))),
-          "x",
-        ),
-      ),
-    );
+    let b = AstBuilder::default();
+    let ast = b.make_funs(|[m, n]| {
+      b.unlabel(
+        b.project(Direction::Left, b.concat(b.var(m), b.var(n))),
+        "x",
+      )
+    });
 
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
 
@@ -281,7 +317,7 @@ mod tests {
     let goal = RowVar(0);
     let a = TypeVar(2);
     assert_eq!(
-      ty_chk.1,
+      ty_chk.scheme,
       TypeScheme {
         unbound_rows: set![n, RowVar(1), m, goal],
         unbound_tys: set![a],
@@ -307,23 +343,13 @@ mod tests {
 
   #[test]
   fn test_sums() {
-    let f = Var(0);
-    let g = Var(1);
-    let x = Var(2);
-    let ast = Ast::fun(
-      f,
-      Ast::fun(
-        g,
-        Ast::fun(
-          x,
-          Ast::app(
-            Ast::branch_(Ast::Var(f), Ast::Var(g)),
-            Ast::inject_(Direction::Right, Ast::label("Con", Ast::Var(x))),
-          ),
-        ),
-      ),
-    );
-
+    let b = AstBuilder::default();
+    let ast = b.make_funs(|[f, g, x]| {
+      b.app(
+        b.branch(b.var(f), b.var(g)),
+        b.inject(Direction::Right, b.label("Con", b.var(x))),
+      )
+    });
     let ty_chk = type_infer(ast).expect("Type inference to succeed");
 
     let f = RowVar(3);
@@ -332,7 +358,7 @@ mod tests {
     let a = TypeVar(2);
     let r = TypeVar(3);
     assert_eq!(
-      ty_chk.1,
+      ty_chk.scheme,
       TypeScheme {
         unbound_rows: set![g, f, RowVar(0), goal],
         unbound_tys: set![a, r],
@@ -359,19 +385,4 @@ mod tests {
     );
   }
 
-  #[test]
-  fn type_infer_fails() {
-    let x = Var(0);
-    let ast = Ast::app(Ast::fun(x, Ast::app(Ast::Var(x), Ast::Int(3))), Ast::Int(1));
-
-    let ty_chk_res = type_infer(ast);
-
-    assert_eq!(
-      ty_chk_res,
-      Err(TypeError::TypeNotEqual((
-        Type::fun(Type::Int, Type::Var(TypeVar(1))),
-        Type::Int
-      )))
-    );
-  }
 }

@@ -54,8 +54,8 @@ mod tests {
   use types_base::Ast;
 
   fn name_resolve(input: &str) -> Result<Ast<Var>, NameResolutionError> {
-    let cst = parser_base::parse(input);
-    let (ast, _) = desugar_base::desugar(input, cst)
+    let (cst, _) = parser_base::parse(input);
+    let (ast, _) = desugar_base::desugar(cst)
         .expect("Desugar to succeed");
     name_resolution(ast)
   }
