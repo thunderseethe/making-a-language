@@ -26,7 +26,7 @@ impl AstBuilder {
     Ast::Var(self.next_id(), var)
   }
 
-  pub fn int<V>(&self, i: isize) -> Ast<V> {
+  pub fn int<V>(&self, i: i32) -> Ast<V> {
     Ast::Int(self.next_id(), i)
   }
 

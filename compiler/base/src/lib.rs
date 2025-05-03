@@ -6,7 +6,7 @@ use dashmap::DashMap;
 use desugar_base::{desugar, DesugarError, ErrorKind};
 use emit_base::emit_wasm;
 use lowering_base::{self as ir, lower};
-use monomorph_base::monomorph;
+use monomorph_base::trivial_monomorph;
 use name_resolution_base::{name_resolution, NameResolutionError};
 use parser_base::rowan::NodeOrToken;
 use parser_base::{all_syntax, Flavor, Lang, ParseNode, Syntax, SyntaxNode};
@@ -48,26 +48,6 @@ impl From<TypeError> for CompilerError {
   fn from(value: TypeError) -> Self {
     Self::Type(value)
   }
-}
-
-// At this stage we don't really have enough information to do proper monomorphization.
-// Notably we don't have top level functions or a concept of a main function.
-// Instead of performing real monomorphization, we assume all unsolved type variables are Int.
-//
-// This only works because we lack top level functions. We'll never encounter a case where we want
-// to instantiate a type variable with a function. We also only have one base type, so we're safe
-// to assume all unsolve variables are that type.
-fn trivial_monomorph(ir: ir::IR) -> ir::IR {
-  let mut types = vec![];
-  let mut fun = &ir;
-  // Assume all types are Int.
-  // This can't be wrong for base because we don't yet support any interesting types.
-  // Any function getting passed around will use a function type not a
-  while let ir::IR::TyFun(_, body) = fun {
-    types.push(ir::Type::Int);
-    fun = body;
-  }
-  monomorph(ir, types)
 }
 
 #[wasm_bindgen(getter_with_clone)]

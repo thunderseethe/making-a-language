@@ -557,26 +557,13 @@ mod tests {
 
   use closure_convert_base::{closure_convert, ItemId};
   use expect_test::expect;
-  use lowering_base::{self as ir, lower, IR};
-  use monomorph_base::monomorph;
+  use lowering_base::lower;
+  use monomorph_base::trivial_monomorph;
   use simplify_base::simplify;
   use types_base::{self as ast, builder::{make_vars, AstBuilder}, type_infer, Ast};
   use wasmparser::{Validator, WasmFeatures};
   use wasmprinter::PrintFmtWrite;
   use wasmtime::{Config, Engine, Linker, Module, Store};
-
-  fn trivial_monomorph(ir: IR) -> IR {
-    let mut types = vec![];
-    let mut fun = &ir;
-    // Assume all types are Int.
-    // This can't be wrong for base because we don't yet support any interesting types.
-    // Any function getting passed around will use a function type not a
-    while let IR::TyFun(_, body) = fun {
-      types.push(ir::Type::Int);
-      fun = body;
-    }
-    monomorph(ir, types)
-  }
 
   fn wasm_module_of(ast: Ast<ast::Var>) -> Vec<u8> {
     let (ast, scheme) = type_infer(ast).expect("Type inferce failed");

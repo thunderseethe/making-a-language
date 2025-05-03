@@ -223,8 +223,10 @@ impl ClosureConvert {
     let mut free_vars = body.free_vars();
     free_vars.remove(&var);
 
-    let vars: Vec<Var> = free_vars.iter().cloned().collect();
-    let closure_ty = Type::closure(var.ty.clone(), ret.clone());
+    let vars: Vec<Var> = 
+      free_vars.iter().cloned().collect();
+    let closure_ty = 
+      Type::closure(var.ty.clone(), ret.clone());
     let env_var = Var {
       id: self.var_supply.supply(),
       ty: Type::closure_env(
@@ -250,9 +252,9 @@ impl ClosureConvert {
       })
       .collect::<HashMap<_, _>>();
 
-    let params = vec![env_var, var];
     body.rename(&subst);
 
+    let params = vec![env_var, var];
     let item = self.item_supply.supply();
     self.items.insert(
       item,
@@ -267,8 +269,8 @@ impl ClosureConvert {
 
   fn convert(&mut self, ir: lowering_base::IR, env: im::HashMap<ir::Var, Var>) -> IR {
     match ir {
+      lowering_base::IR::Int(i) => IR::Int(i),
       lowering_base::IR::Var(var) => IR::Var(env[&var].clone()),
-      lowering_base::IR::Int(i) => IR::Int(i.try_into().unwrap()),
       lowering_base::IR::Fun(fun_var, body) => {
         let var = Var {
           id: self.var_supply.supply_for(fun_var.id),
@@ -310,25 +312,24 @@ pub fn closure_convert(ir: lowering_base::IR) -> ClosureConvertOutput {
     .into_iter()
     .map(|param| match param {
       Param::Ty(_) => panic!("ICE: Type function encountered after monomorphizing"),
-      Param::Val(var) => {
-        let id = var_supply.supply_for(var.id);
-        let anf_var = Var {
+      Param::Val(lower_var) => {
+        let id = var_supply.supply_for(lower_var.id);
+        let var = Var {
           id,
-          ty: lower_ty(&var.ty),
+          ty: lower_ty(&lower_var.ty),
         };
-        env.insert(var, anf_var.clone());
-        anf_var
+        env.insert(lower_var, var.clone());
+        var
       }
     })
     .collect();
+  let ret_ty = lower_ty(&ir.type_of());
 
   let mut conversion = ClosureConvert {
     var_supply,
     item_supply: Default::default(),
     items: Default::default(),
   };
-
-  let ret_ty = lower_ty(&ir.type_of());
   let body = conversion.convert(ir, env);
   ClosureConvertOutput {
     item: Item {
@@ -345,23 +346,10 @@ mod tests {
   use super::*;
   use expect_test::expect;
   use lowering_base::pretty::pretty_string;
-  use lowering_base::{self as ir, lower, Type};
-  use monomorph_base::monomorph;
+  use lowering_base::lower;
+  use monomorph_base::trivial_monomorph;
   use simplify_base::simplify;
   use types_base::{self as ast, type_infer, Ast, builder::{make_vars, AstBuilder}};
-
-  fn trivial_monomorph(ir: ir::IR) -> ir::IR {
-    let mut types = vec![];
-    let mut fun = &ir;
-    // Assume all types are Int.
-    // This can't be wrong for base because we don't yet support any interesting types.
-    // Any function getting passed around will use a function type not a
-    while let ir::IR::TyFun(_, body) = fun {
-      types.push(Type::Int);
-      fun = body;
-    }
-    monomorph(ir, types)
-  }
 
   fn test_lamba_lift(ast: Ast<ast::Var>) -> ClosureConvertOutput {
     let (ast, scheme) = type_infer(ast).expect("Typechecking to succeed");
