@@ -4,8 +4,8 @@ use std::ops::{ControlFlow, Range};
 
 use enum_iterator::{all, Sequence};
 use logos::{Logos, SpannedIter};
-pub use rowan::api::SyntaxNode;
 pub use rowan;
+pub use rowan::api::SyntaxNode;
 use rowan::{GreenNode, GreenNodeBuilder, SyntaxKind};
 use syntree::flavor;
 pub use syntree::{Builder, FlavorDefault, Node as ParseNode, Tree};
@@ -88,11 +88,10 @@ impl<'a> Input<'a> {
     self
       .lexer
       .peek()
-      .map(|(tok, span)| match tok {
-        Ok(tok) => tok,
-        Err(_) => panic!("{}", &self.content[span.start..span.end]),
+      .map(|(tok, _)| match tok {
+        Ok(tok) => *tok,
+        Err(_) => Syntax::Error,
       })
-      .copied()
       .unwrap_or(Syntax::EndOfFile)
   }
 
@@ -136,7 +135,7 @@ impl rowan::Language for Lang {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
-  pub expected: Vec<Syntax>, 
+  pub expected: Vec<Syntax>,
   pub span: Range<usize>,
 }
 
@@ -173,8 +172,13 @@ impl<'a> Parser<'a> {
       }
       None => {
         if let Some(span) = self.input.advance() {
-          self.builder.token(Syntax::Error.into(), &self.input.content[span.clone()]);
-          self.errors.push(ParseError { expected: vec![token], span })
+          self
+            .builder
+            .token(Syntax::Error.into(), &self.input.content[span.clone()]);
+          self.errors.push(ParseError {
+            expected: vec![token],
+            span,
+          })
         }
         None
       }
@@ -260,13 +264,34 @@ impl<'a> Parser<'a> {
     }
   }
 
+  fn leftovers(&mut self) {
+    let mut err_span = None;
+    self.with(Syntax::Error, |this| {
+      for (tok, span) in &mut this.input.lexer {
+        let tok = match tok {
+          Ok(tok) => tok,
+          Err(()) => Syntax::Error,
+        };
+        this.builder.token(
+          tok.into(), 
+          &this.input.content[span.clone()]);
+        err_span.get_or_insert(span).end = span.end;
+      }
+    });
+    if let Some(err_span) = err_span {
+      self.errors.push(ParseError {
+        expected: vec![Syntax::EndOfFile], 
+        span: err_span 
+      });
+    }
+  }
+
   fn parse(mut self) -> (GreenNode, Vec<ParseError>) {
     self.with(Syntax::Program, |this| {
       this.expr();
+      this.leftovers();
     });
-    ( self.builder.finish()
-    , self.errors
-    )
+    (self.builder.finish(), self.errors)
   }
 }
 
@@ -332,6 +357,20 @@ let x_y_2 = ( \ x ->
     let expect = expect_test::expect![[r#"
     let x_y_2 = ( \ x -> 
         \ y -> x) 2 (\z test_id -> z)"#]];
+    expect.assert_eq(tree.to_string().trim());
+  }
+
+  #[test]
+  fn parse_let_in_invalid_position() {
+    let input = r#"
+let y = \x -> x;
+y let a = 1;
+y a 
+"#;
+    let (tree, _) = parse(input);
+    let expect = expect_test::expect![[r#"
+        let y = \x -> x;
+        y"#]];
     expect.assert_eq(tree.to_string().trim());
   }
 }
