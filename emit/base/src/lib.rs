@@ -143,7 +143,7 @@ impl EmitType {
 
   fn emit_val_ty(&mut self, ty: &Type) -> ValType {
     match ty {
-      Type::I32 => ValType::I32,
+      Type::Int => ValType::I32,
       Type::Closure(arg, ret) => self.emit_closure_index(arg, ret).struct_index.as_val_ty(),
       Type::ClosureEnv(closure, _) => self.emit_val_ty(closure),
     }

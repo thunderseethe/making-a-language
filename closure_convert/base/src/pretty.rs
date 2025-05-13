@@ -27,7 +27,7 @@ where
 {
   fn pretty(self, a: &'a D) -> DocBuilder<'a, D, ()> {
     match self {
-      Type::I32 => a.text("i32"),
+      Type::Int => a.text("i32"),
       Type::Closure(arg, ret) => arg
         .pretty(a)
         .append(a.space())

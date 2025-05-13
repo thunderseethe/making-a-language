@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dashmap::DashMap;
 use desugar_base::{DesugarError, ErrorKind, SyncNode};
 use name_resolution_base::NameResolutionError;
-use parser_base::{Lang, ParseError, RowanCst, SyntaxNode};
-use tower_lsp_server::lsp_types::{Diagnostic, LinkedEditingRanges, Position, Range as LspRange, Uri};
+use parser_base::{ParseError, RowanCst};
+use tower_lsp_server::lsp_types::{Diagnostic, Position, Range as LspRange, Uri};
 use types_base::{Ast, NodeId, TypeError, TypeErrorKind, TypeScheme, TypedVar, Var};
 use wasm_bindgen::JsValue;
 
@@ -17,26 +18,19 @@ enum Color {
 
 #[derive(Default, Debug)]
 struct ColorMap {
-  storage: DashMap<QueryKey, Color>,
+  storage: DashMap<QueryKey, (Color, usize)>,
 }
 impl ColorMap {
-  fn get(&self, key: &QueryKey) -> Option<Color> {
-    self
-      .storage
-      .get(key)
-      .map(|r| *r.value())
+  fn get(&self, key: &QueryKey) -> Option<(Color, usize)> {
+    self.storage.get(key).map(|r| *r.value())
   }
 
-  fn mark_red(&self, key: QueryKey) -> Option<Color> {
-    self
-      .storage
-      .insert(key, Color::Red)
+  fn mark_red(&self, key: QueryKey, revision: usize) -> Option<(Color, usize)> {
+    self.storage.insert(key, (Color::Red, revision))
   }
 
-  fn mark_green(&self, key: QueryKey) -> Option<Color> {
-    self
-      .storage
-      .insert(key, Color::Green)
+  fn mark_green(&self, key: QueryKey, reivision: usize) -> Option<(Color, usize)> {
+    self.storage.insert(key, (Color::Green, reivision))
   }
 }
 
@@ -60,6 +54,7 @@ pub struct Database {
   desugar_query: DashMap<QueryKey, Result<(Ast<String>, HashMap<NodeId, SyncNode>), PellucidError>>,
   nameresolve_query: DashMap<QueryKey, Result<Ast<Var>, PellucidError>>,
   types_query: DashMap<QueryKey, Result<(Ast<TypedVar>, TypeScheme), PellucidError>>,
+  revision: AtomicUsize,
 }
 
 #[derive(Default, Clone, PartialEq, Eq, Debug)]
@@ -68,7 +63,7 @@ pub struct Newlines {
   /// The value stored at each index is the byte offset where that line starts.
   line_offsets: Vec<usize>,
   /// Length of the string in bytes.
-  len: usize
+  len: usize,
 }
 
 impl Newlines {
@@ -81,7 +76,7 @@ impl Newlines {
       byte += line.len() + 1;
     }
     // Push our final line.
-    line_offsets.push(byte);
+    //line_offsets.push(byte);
     Self {
       line_offsets,
       len: content.len(),
@@ -89,17 +84,20 @@ impl Newlines {
   }
 
   fn linecol_of(&self, byte: usize) -> Option<(u32, u32)> {
-    if byte >= self.len {
+    if byte > self.len {
       return None;
-    } 
-    let line = self.line_offsets.partition_point(|&offset| offset <= byte);
+    }
+    let line = self.line_offsets.partition_point(|&offset| offset <= byte) - 1;
     let start = self.line_offsets[line];
     let col = byte - start;
     Some((line.try_into().unwrap(), col.try_into().unwrap()))
   }
 
   fn byte_of(&self, line: u32, character: u32) -> Option<usize> {
-    self.line_offsets.get(line as usize).map(|start| start + (character as usize))
+    self
+      .line_offsets
+      .get(line as usize)
+      .map(|start| start + (character as usize))
   }
 
   fn lsp_range_for(&self, range: Range<usize>) -> Option<LspRange> {
@@ -156,16 +154,18 @@ impl Database {
   }
 
   fn try_mark_green(&self, key: QueryKey) -> Color {
+    let revision = self.revision.load(Ordering::SeqCst);
     for dep in self.dependencies(&key) {
       match self.colors.get(&key) {
-        Some(Color::Green) => continue,
-        Some(Color::Red) => return Color::Red,
-        None => {
+        Some((Color::Green, rev)) if revision == rev => continue,
+        Some((Color::Red, _)) => return Color::Red,
+        _ => {
           if self.try_mark_green(dep.clone()) != Color::Green {
             self.run_query(dep);
+            // Because we just ran the query we can be sure the revision is up to date.
             match self.colors.get(&key) {
-              Some(Color::Green) => continue,
-              Some(Color::Red) => return Color::Red,
+              Some((Color::Green, _)) => continue,
+              Some((Color::Red, _)) => return Color::Red,
               None => unreachable!(),
             }
           }
@@ -173,7 +173,7 @@ impl Database {
       }
     }
     // if we marked all dependencies green, mark this node green
-    self.colors.mark_green(key);
+    self.colors.mark_green(key, revision);
     Color::Green
   }
 
@@ -183,13 +183,30 @@ impl Database {
     cache: &DashMap<QueryKey, V>,
     producer: impl FnOnce(&Self, &QueryKey) -> V,
   ) -> V {
-    let Some(_) = self.colors.get(&key) else {
+    let Some((_, rev)) = self.colors.get(&key) else {
       // We have not yet run this query, so we must run it.
       let value = producer(self, &key);
       cache.insert(key.clone(), value.clone());
-      self.colors.mark_red(key);
+      self
+        .colors
+        .mark_red(key, self.revision.load(Ordering::SeqCst));
       return value;
     };
+    let revision = self.revision.load(Ordering::SeqCst);
+    let update_value = |key| {
+      let value = producer(self, &key);
+      let old = cache.insert(key.clone(), value.clone());
+      match old {
+        Some(old) if old == value => self.colors.mark_green(key, revision),
+        _ => self.colors.mark_red(key, revision),
+      };
+      value
+    };
+    // Our query is outdated
+    if rev < revision {
+      return update_value(key);
+    }
+
     let color = self.try_mark_green(key.clone());
     match color {
       Color::Green => cache
@@ -202,15 +219,7 @@ impl Database {
         })
         .value()
         .clone(),
-      Color::Red => {
-        let value = producer(self, &key);
-        let old = cache.insert(key.clone(), value.clone());
-        match old {
-          Some(old) if old == value => self.colors.mark_green(key),
-          _ => self.colors.mark_red(key),
-        };
-        value
-      }
+      Color::Red => update_value(key),
     }
   }
 }
@@ -228,11 +237,15 @@ impl Database {
   pub fn set_input(&self, uri: Uri, content: String) {
     let key = QueryKey::ContentOf(uri);
     self.content_input.insert(key.clone(), content);
-    self.colors.mark_red(key);
+    let old_revision = self.revision.fetch_add(1, Ordering::SeqCst);
+    self.colors.mark_red(key, old_revision + 1);
   }
 
   pub fn content_of(&self, uri: Uri) -> String {
-    self.colors.mark_green(QueryKey::ContentOf(uri.clone()));
+    self.colors.mark_green(
+      QueryKey::ContentOf(uri.clone()),
+      self.revision.load(Ordering::SeqCst),
+    );
     self
       .content_input
       .get(&QueryKey::ContentOf(uri))
@@ -316,9 +329,8 @@ impl Database {
     // TODO: We should produce multiple diagnostics here.
     match self.types_of(uri.clone()) {
       Ok(_) => {
-        web_sys::console::log_1(&JsValue::from_str("types were chill"));
         vec![]
-      },
+      }
       Err(err) => {
         let newlines = self.newlines_of(uri.clone());
 
@@ -327,20 +339,22 @@ impl Database {
             .into_iter()
             .map(|err| {
               Diagnostic::new_simple(
-                newlines.lsp_range_for(err.span).expect("error span outside range"),
+                newlines
+                  .lsp_range_for(err.span)
+                  .expect("error span outside range"),
                 format!("Expected one of {:?}", err.expected),
               )
             })
             .collect(),
           PellucidError::Desugar(desugar) => {
             vec![Diagnostic::new_simple(
-              newlines.lsp_range_for(desugar.span).expect("error span outside range"),
+              newlines
+                .lsp_range_for(desugar.span)
+                .expect("error span outside range"),
               match desugar.kind {
                 ErrorKind::MissingSyntax(node) => format!("Expected node {:?}", node),
                 ErrorKind::ProgramMissingExpr => "Program missing expression node".to_string(),
-                ErrorKind::ExpectedLetOrAppInExpr(syntax) => {
-                  format!("Expected let or app node, but encountered {:?}", syntax)
-                }
+                ErrorKind::ExpectedLetOrAppInExpr(syntax) => format!("Expected let or app node, but encountered {:?}", syntax),
                 ErrorKind::LetMissingBinding => "Let missing a variable".to_string(),
                 ErrorKind::LetMissingExpr => "Let missing a rhs expr".to_string(),
                 ErrorKind::Unexpected(vec) => format!("Unexpected {:?}", vec), //TODO: Format this
@@ -349,12 +363,8 @@ impl Database {
                 ErrorKind::FunMissingIdentifier => "Function missing a variable".to_string(),
                 ErrorKind::FunMissingExpr => "Function missing a body".to_string(),
                 ErrorKind::EmptyApplication => "Expected application but it was empty".to_string(),
-                ErrorKind::VarMissingIdentifier => {
-                  "Expected variable to contain an identifier token".to_string()
-                }
-                ErrorKind::IntegerExprMissingInt => {
-                  "Expected integer expr to contain an int token".to_string()
-                }
+                ErrorKind::VarMissingIdentifier => "Expected variable to contain an identifier token".to_string(), 
+                ErrorKind::IntegerExprMissingInt => "Expected integer expr to contain an int token".to_string(),
               },
             )]
           }
@@ -367,22 +377,21 @@ impl Database {
               NameResolutionError::UndefinedVar(node_id, var) => (node_id, var),
             };
             vec![Diagnostic::new_simple(
-              newlines.lsp_range_for(ast_to_cst[&node_id].span.into()).expect("error span outside range"),
+              newlines
+                .lsp_range_for(ast_to_cst[&node_id].span.into())
+                .expect("error span outside range"),
               format!("Undefined variable {}", var),
             )]
           }
           PellucidError::Types(types) => {
-
             let (_, ast_to_cst) = self
               .desugar_of(uri.clone())
               .expect("We can be sure this is Ok(_) otherwise we'd hit DesugarError case above");
-
+            web_sys::console::log_1(&JsValue::from_str(&format!("{:?}", self.colors)));
             vec![Diagnostic::new_simple(
-              newlines.lsp_range_for(ast_to_cst[&types.node_id].span.into())
-                .unwrap_or_else(|| {
-                  let (cst, _) = self.cst_of(uri); 
-                  panic!("error span outside range: {:?}\n{}", ast_to_cst[&types.node_id].span, SyntaxNode::<Lang>::new_root(cst))
-                }),
+              newlines
+                .lsp_range_for(ast_to_cst[&types.node_id].span.into())
+                .expect("error span outside range"),
               match types.kind {
                 TypeErrorKind::TypeNotEqual(left, right) => {
                   format!("Types are not equal: {:?} != {:?}", left, right)

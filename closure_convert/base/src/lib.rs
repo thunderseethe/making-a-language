@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 
-use lowering_base::{self as ir};
+use lowering_base::{self as lowering};
 use simplify_base::{IRExt as SimplifyExt, Param};
 use std::collections::HashMap;
 
@@ -113,7 +113,7 @@ impl IR {
   pub fn type_of(&self) -> Type {
     match self {
       IR::Var(var) => var.ty.clone(),
-      IR::Int(_) => Type::I32,
+      IR::Int(_) => Type::Int,
       IR::Closure(ty, _, _) => ty.clone(),
       IR::Apply(closure, arg) => {
         let Type::Closure(arg_ty, ret_ty) = closure.type_of() else {
@@ -144,11 +144,11 @@ pub struct Item {
 #[derive(Default)]
 pub struct VarSupply {
   next: usize,
-  cache: HashMap<ir::VarId, VarId>,
+  cache: HashMap<lowering::VarId, VarId>,
 }
 
 impl VarSupply {
-  fn supply_for(&mut self, var: ir::VarId) -> VarId {
+  fn supply_for(&mut self, var: lowering::VarId) -> VarId {
     self
       .cache
       .entry(var)
@@ -182,9 +182,9 @@ impl ItemSupply {
 
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub enum Type {
-  I32,
-  Closure(Box<Type>, Box<Type>),
-  ClosureEnv(Box<Type>, Vec<Type>),
+  Int,
+  Closure(Box<Self>, Box<Self>),
+  ClosureEnv(Box<Self>, Vec<Self>),
 }
 
 impl Type {
@@ -197,11 +197,11 @@ impl Type {
   }
 }
 
-fn lower_ty(ty: &ir::Type) -> Type {
+fn lower_ty(ty: &lowering::Type) -> Type {
   match ty {
-    ir::Type::Int => Type::I32,
-    ir::Type::Fun(arg, ret) => Type::closure(lower_ty(arg), lower_ty(ret)),
-    ir::Type::Var(_) | ir::Type::TyFun(_, _) => panic!("ICE: Type function or variable appeared in closure conversion. This should've been handled by monomorphization."),
+    lowering::Type::Int => Type::Int,
+    lowering::Type::Fun(arg, ret) => Type::closure(lower_ty(arg), lower_ty(ret)),
+    lowering::Type::Var(_) | lowering::Type::TyFun(_, _) => panic!("ICE: Type function or variable appeared in closure conversion. This should've been handled by monomorphization."),
   }
 }
 
@@ -216,10 +216,10 @@ impl ClosureConvert {
     &mut self,
     var: Var,
     body: lowering_base::IR,
-    env: im::HashMap<ir::Var, Var>,
+    env: im::HashMap<lowering::Var, Var>,
   ) -> IR {
     let ret = lower_ty(&body.type_of());
-    let mut body = self.convert(body.clone(), env);
+    let mut body = self.convert(body, env);
     let mut free_vars = body.free_vars();
     free_vars.remove(&var);
 
@@ -267,23 +267,14 @@ impl ClosureConvert {
     IR::Closure(closure_ty, item, vars)
   }
 
-  fn convert(&mut self, ir: lowering_base::IR, env: im::HashMap<ir::Var, Var>) -> IR {
+  fn convert(&mut self, ir: lowering::IR, env: im::HashMap<lowering::Var, Var>) -> IR {
     match ir {
-      lowering_base::IR::Int(i) => IR::Int(i),
-      lowering_base::IR::Var(var) => IR::Var(env[&var].clone()),
-      lowering_base::IR::Fun(fun_var, body) => {
-        let var = Var {
-          id: self.var_supply.supply_for(fun_var.id),
-          ty: lower_ty(&fun_var.ty),
-        };
-        self.make_closure(var.clone(), *body, env.update(fun_var, var))
+      lowering::IR::Int(i) => IR::Int(i),
+      lowering::IR::Var(var) => IR::Var(env[&var].clone()),
+      lowering::IR::TyFun(_, _) | lowering_base::IR::TyApp(_, _) => {
+        panic!("ICE: Generics appeared after monomorphizing")
       }
-      lowering_base::IR::App(fun, arg) => {
-        let closure = self.convert(*fun, env.clone());
-        let arg = self.convert(*arg, env);
-        IR::apply(closure, arg)
-      }
-      lowering_base::IR::Local(var, defn, body) => {
+      lowering::IR::Local(var, defn, body) => {
         let defn = self.convert(*defn, env.clone());
         let v = Var {
           id: self.var_supply.supply_for(var.id),
@@ -292,8 +283,17 @@ impl ClosureConvert {
         let body = self.convert(*body, env.update(var, v.clone()));
         IR::local(v, defn, body)
       }
-      lowering_base::IR::TyFun(_, _) | lowering_base::IR::TyApp(_, _) => {
-        panic!("ICE: Generics appeared after monomorphizing")
+      lowering::IR::Fun(fun_var, body) => {
+        let var = Var {
+          id: self.var_supply.supply_for(fun_var.id),
+          ty: lower_ty(&fun_var.ty),
+        };
+        self.make_closure(var.clone(), *body, env.update(fun_var, var))
+      }
+      lowering::IR::App(fun, arg) => {
+        let closure = self.convert(*fun, env.clone());
+        let arg = self.convert(*arg, env);
+        IR::apply(closure, arg)
       }
     }
   }
@@ -304,7 +304,7 @@ pub struct ClosureConvertOutput {
   pub closure_items: BTreeMap<ItemId, Item>,
 }
 
-pub fn closure_convert(ir: lowering_base::IR) -> ClosureConvertOutput {
+pub fn closure_convert(ir: lowering::IR) -> ClosureConvertOutput {
   let (params, ir) = ir.split_funs();
   let mut var_supply = VarSupply::default();
   let mut env = im::HashMap::default();
@@ -327,8 +327,8 @@ pub fn closure_convert(ir: lowering_base::IR) -> ClosureConvertOutput {
 
   let mut conversion = ClosureConvert {
     var_supply,
-    item_supply: Default::default(),
-    items: Default::default(),
+    item_supply: ItemSupply::default(),
+    items: BTreeMap::default(),
   };
   let body = conversion.convert(ir, env);
   ClosureConvertOutput {
