@@ -96,6 +96,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "monomorph-base"
+version = "0.1.0"
+dependencies = [
+ "expect-test",
+ "im",
+ "lowering-base",
+ "simplify-base",
+ "types-base",
+]
+
+[[package]]
 name = "once_cell"
 version = "1.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"

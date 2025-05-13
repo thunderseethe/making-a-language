@@ -3,6 +3,7 @@ members = [
   "lowering/base",
   "lowering/rows",
   "lowering/items",
+  "monomorph/base",
   "simplify/base",
   "types/base",
   "types/items",
@@ -14,6 +15,7 @@ types-base = { path = "types/base" }
 types-rows = { path = "types/rows" }
 types-items = { path = "types/items" }
 lowering-base = { path = "lowering/base" }
+simplify-base = { path = "simplify/base" }
 ena = "0.14.2"
 im = "15.1"
 pretty_assertions = "1.4"

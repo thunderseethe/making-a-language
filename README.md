@@ -16,3 +16,5 @@ The stages in the compiler:
   * [items](/lowering/items) - Lowering top level items into our IR.
 * [simplify](/simplify) - Simplify our IR to improve its performance.
   * [base](/simplify/base) - Simplifying our base IR.
+* [monomorph](/monomorph) - Monomorphization removes polymorphism from our IR.
+  * [base](/monomorph/base) - Monomorphizing our base IR.
