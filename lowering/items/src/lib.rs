@@ -163,7 +163,7 @@ pub enum TyApp {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub enum IR {
   Var(Var),
-  Int(isize),
+  Int(i32),
   Fun(Var, Box<Self>),
   App(Box<Self>, Box<Self>),
   TyFun(Kind, Box<Self>),

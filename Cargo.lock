@@ -18,6 +18,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "closure-convert-base"
+version = "0.1.0"
+dependencies = [
+ "expect-test",
+ "im",
+ "lowering-base",
+ "monomorph-base",
+ "pretty",
+ "simplify-base",
+ "types-base",
+]
+
+[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"

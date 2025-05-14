@@ -18,3 +18,5 @@ The stages in the compiler:
   * [base](/simplify/base) - Simplifying our base IR.
 * [monomorph](/monomorph) - Monomorphization removes polymorphism from our IR.
   * [base](/monomorph/base) - Monomorphizing our base IR.
+* [closure_convert](/closure_convert) - Closure conversion removes functions from our IR.
+  * [base](/closure_convert/base) - Closure convert our base IR.

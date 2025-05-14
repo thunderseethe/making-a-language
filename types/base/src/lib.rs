@@ -23,7 +23,7 @@ pub enum Ast<V> {
   /// A local variable
   Var(NodeId, V),
   /// An integer literal
-  Int(NodeId, isize),
+  Int(NodeId, i32),
   /// A function literal (lambda, closure).
   Fun(NodeId, V, Box<Ast<V>>),
   /// Function application
