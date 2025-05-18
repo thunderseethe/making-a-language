@@ -8,4 +8,3 @@ parser-base.workspace = true
 types-base.workspace = true
 
 im.workspace = true
-syntree.workspace = true

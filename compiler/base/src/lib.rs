@@ -9,7 +9,7 @@ use lowering_base::{self as ir, lower};
 use monomorph_base::trivial_monomorph;
 use name_resolution_base::{name_resolution, NameResolutionError};
 use parser_base::rowan::NodeOrToken;
-use parser_base::{all_syntax, Flavor, Lang, ParseNode, Syntax, SyntaxNode};
+use parser_base::{all_syntax, Lang, Syntax, SyntaxNode};
 use simplify_base::simplify;
 
 use tower_lsp_server::jsonrpc::Result;

@@ -7,7 +7,7 @@ edition = "2021"
 expect-test.workspace = true
 
 [dependencies]
-syntree.workspace = true
+enum-iterator = "2.1.0"
+bit-set = "0.8.0"
 logos = "0.15"
 rowan = "0.16"
-enum-iterator = "2.1.0"

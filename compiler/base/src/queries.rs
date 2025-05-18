@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use dashmap::DashMap;
 use desugar_base::{DesugarError, ErrorKind, SyncNode};
 use name_resolution_base::NameResolutionError;
-use parser_base::{ParseError, RowanCst};
+use parser_base::{ParseError, Cst};
 use tower_lsp_server::lsp_types::{Diagnostic, Position, Range as LspRange, Uri};
 use types_base::{Ast, NodeId, TypeError, TypeErrorKind, TypeScheme, TypedVar, Var};
 use wasm_bindgen::JsValue;
@@ -49,7 +49,7 @@ pub struct Database {
   colors: ColorMap,
   // Query caches
   content_input: DashMap<QueryKey, String>,
-  cst_query: DashMap<QueryKey, (RowanCst, Vec<ParseError>)>,
+  cst_query: DashMap<QueryKey, (Cst, Vec<ParseError>)>,
   newlines_query: DashMap<QueryKey, Newlines>,
   desugar_query: DashMap<QueryKey, Result<(Ast<String>, HashMap<NodeId, SyncNode>), PellucidError>>,
   nameresolve_query: DashMap<QueryKey, Result<Ast<Var>, PellucidError>>,
@@ -253,7 +253,7 @@ impl Database {
       .expect("Uri was queried with unset value")
   }
 
-  pub fn cst_of(&self, uri: Uri) -> (parser_base::RowanCst, Vec<ParseError>) {
+  pub fn cst_of(&self, uri: Uri) -> (parser_base::Cst, Vec<ParseError>) {
     self.query(QueryKey::CstOf(uri), &self.cst_query, |this, key| {
       let QueryKey::CstOf(uri) = key else {
         unreachable!()

@@ -35,12 +35,12 @@ parser-base = { path = "parser/base" }
 desugar-base = { path = "desugar/base" }
 name-resolution-base = { path = "name_resolution/base" }
 compiler-base = { path = "compiler/base" }
+
 ena = "0.14.2"
 expect-test = "1.5.1"
 im = "15.1"
 pretty_assertions = "1.4"
 pretty = "0.12.3"
-syntree = "0.18"
 wasmtime = "31" 
 
 [dependencies]
