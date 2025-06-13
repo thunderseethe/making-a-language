@@ -2,15 +2,14 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Index;
 
 use closure_convert_base::{Item, ItemId, Type, Var, VarId, IR};
-use lowering_base::pretty::pretty_string;
 use wasm_encoder::{
   AbstractHeapType, CodeSection, CompositeInnerType, CompositeType, ExportKind, ExportSection,
-  FieldType, FuncType, Function, FunctionSection, HeapType, Instruction, Module,
-  RefType, StorageType, StructType, SubType, TypeSection, ValType,
+  FieldType, FuncType, Function, FunctionSection, HeapType, Instruction, Module, RefType,
+  StorageType, StructType, SubType, TypeSection, ValType,
 };
 
 #[derive(Eq, Hash, PartialEq)]
-enum WasmTy {
+enum PartialTy {
   Func(FuncType),
   Struct(Vec<FieldType>, bool),
 }
@@ -44,29 +43,28 @@ struct ClosureTypeIndex {
 
 #[derive(Default)]
 struct EmitType {
-  types: Vec<WasmTy>,
+  types: Vec<PartialTy>,
   supertypes: HashMap<u32, u32>,
 }
 
 impl EmitType {
   fn into_type_section(self) -> TypeSection {
     let mut sect = TypeSection::new();
-    let supertype_set = self.supertypes.values().copied().collect::<HashSet<_>>();
     for (i, ty) in self.types.into_iter().enumerate() {
-      let indx: u32 = i.try_into().unwrap();
-      let supertype_idx = self.supertypes.get(&indx).copied();
       let (inner, is_final) = match ty {
-        WasmTy::Func(func_type) => (
+        PartialTy::Func(func_type) => (
           CompositeInnerType::Func(func_type),
-          !supertype_set.contains(&indx),
+          true,
         ),
-        WasmTy::Struct(fields, is_final) => (
+        PartialTy::Struct(fields, is_final) => (
           CompositeInnerType::Struct(StructType {
             fields: fields.into_boxed_slice(),
           }),
           is_final,
         ),
       };
+      let indx: u32 = i.try_into().unwrap();
+      let supertype_idx = self.supertypes.get(&indx).copied();
       sect.ty().subtype(&SubType {
         is_final,
         supertype_idx,
@@ -79,7 +77,7 @@ impl EmitType {
     sect
   }
 
-  fn emit_ref_ty(&mut self, key: WasmTy) -> u32 {
+  fn emit_ref_ty(&mut self, key: PartialTy) -> u32 {
     self
       .types
       .iter()
@@ -97,16 +95,13 @@ impl EmitType {
     let arg_valty = self.emit_val_ty(arg);
     let ret_valty = self.emit_val_ty(ret);
 
-    let func_index = self.emit_ref_ty(WasmTy::Func(FuncType::new(
+    let func_index = self.emit_ref_ty(PartialTy::Func(FuncType::new(
       [abstract_struct_ty(), arg_valty],
       [ret_valty],
     )));
-    let struct_index = self.emit_ref_ty(WasmTy::Struct(
+    let struct_index = self.emit_ref_ty(PartialTy::Struct(
       vec![FieldType {
-        element_type: StorageType::Val(ValType::Ref(RefType {
-          nullable: false,
-          heap_type: HeapType::Concrete(func_index),
-        })),
+        element_type: StorageType::Val(func_index.as_val_ty()),
         mutable: false,
       }],
       false,
@@ -128,7 +123,6 @@ impl EmitType {
       element_type: StorageType::Val(closure_indices.func_index.as_val_ty()),
       mutable: false,
     };
-    let super_indx = self.emit_ref_ty(WasmTy::Struct(vec![code_field], false));
     let fields = std::iter::once(code_field)
       .chain(env.iter().map(|ty| FieldType {
         element_type: StorageType::Val(self.emit_val_ty(ty)),
@@ -136,9 +130,10 @@ impl EmitType {
       }))
       .collect();
 
-    let struct_idx = self.emit_ref_ty(WasmTy::Struct(fields, true));
-    self.supertypes.insert(struct_idx, super_indx);
-    struct_idx
+    let abstract_indx = self.emit_ref_ty(PartialTy::Struct(vec![code_field], false));
+    let concrete_indx = self.emit_ref_ty(PartialTy::Struct(fields, true));
+    self.supertypes.insert(concrete_indx, abstract_indx);
+    concrete_indx
   }
 
   fn emit_val_ty(&mut self, ty: &Type) -> ValType {
@@ -150,10 +145,7 @@ impl EmitType {
   }
 
   fn emit_item_ty(&mut self, item: &Item) -> u32 {
-    let ret_ty = match &item.ret_ty {
-      Type::Closure(_, _) => abstract_struct_ty(),
-      ty => self.emit_val_ty(ty),
-    };
+    let ret_ty = self.emit_val_ty(&item.ret_ty);
     let func_ty = FuncType::new(
       item.params.iter().map(|var|
           // For definition parameters we need to handle closure environment parameters specially.
@@ -165,211 +157,21 @@ impl EmitType {
           }),
       [ret_ty],
     );
-    self.emit_ref_ty(WasmTy::Func(func_ty))
+    self.emit_ref_ty(PartialTy::Func(func_ty))
   }
 }
 
-/*
-struct EmitWasm {
-  types: EmitType,
-  func: FunctionSection,
-  functions: HashMap<DefinitionId, u32>,
-  code: CodeSection,
-}
-
-impl EmitWasm {
-  fn emit_anf(
-    &mut self,
-    locals: &HashMap<VarId, (u32, ValType)>,
-    ty: &Type,
-    anf: Anf,
-  ) -> Vec<Instruction<'static>> {
-    match anf {
-      Anf::Atom(atom) => match atom {
-        Atom::Var(var) => vec![Instruction::LocalGet(locals[&var.id].0)],
-        Atom::Int(i) => vec![Instruction::I32Const(i.try_into().unwrap())],
-      },
-      Anf::Closure(definition_id, vars) => {
-        // This is not the function type, what am I doing??
-        let func_indx = self.functions[&definition_id];
-        let struct_idx = self
-          .types
-          .emit_closure_env_index(ty, &vars.iter().map(|v| v.ty.clone()).collect::<Vec<_>>());
-        let ValType::Ref(RefType { heap_type, .. }) = self.types.emit_val_ty(ty) else {
-          panic!("ICE: Closure assigned to variable with non closure type");
-        };
-        let mut ins = vec![Instruction::RefFunc(func_indx)];
-        ins.extend(
-          vars
-            .into_iter()
-            .map(|var| Instruction::LocalGet(locals[&var.id].0)),
-        );
-        ins.push(Instruction::StructNew(struct_idx));
-        ins.push(Instruction::RefCastNonNull(heap_type));
-        ins
-      }
-      Anf::Apply(var, atom) => {
-        let local_idx = locals[&var.id].0;
-        let Type::Closure(arg, ret) = &var.ty else {
-          panic!("ICE: Expected clsoure type for function of apply");
-        };
-        let closure_indices = self.types.emit_closure_index(arg, ret);
-        vec![
-          Instruction::LocalGet(local_idx),
-          match atom {
-            Atom::Var(var) => Instruction::LocalGet(locals[&var.id].0),
-            Atom::Int(i) => Instruction::I32Const(i.try_into().unwrap()),
-          },
-          Instruction::LocalGet(local_idx),
-          Instruction::StructGet {
-            struct_type_index: closure_indices.struct_index,
-            field_index: 0,
-          },
-          Instruction::CallRef(closure_indices.func_index),
-        ]
-      }
-      Anf::Access(var, field_index) => {
-        let local = locals[&var.id];
-        let ValType::Ref(RefType {
-          heap_type: HeapType::Concrete(struct_type_index),
-          ..
-        }) = local.1
-        else {
-          panic!("ICE: Struct access contained non struct variable.");
-        };
-
-        vec![
-          Instruction::LocalGet(local.0),
-          Instruction::StructGet {
-            struct_type_index,
-            // Our struct includes a code field in slot 0, so all our accesses need to be adjusted
-            // by 1.
-            field_index: field_index + 1,
-          },
-        ]
-      }
-    }
-  }
-
-  fn emit_locals(
-    &mut self,
-    params: &[Var],
-    ret: &Type,
-    body: Locals,
-  ) -> (Vec<Instruction>, Vec<ValType>) {
-    let mut local_tys: Vec<ValType> = vec![];
-    let mut locals: HashMap<VarId, (u32, ValType)> = params
-      .iter()
-      .map(|var| (var, self.types.emit_val_ty(&var.ty)))
-      .collect::<Vec<_>>()
-      .into_iter()
-      .chain(body.binds.iter().map(|(var, _)| {
-        let ty = self.types.emit_val_ty(&var.ty);
-        local_tys.push(ty);
-        (var, ty)
-      }))
-      .enumerate()
-      .map(|(local, (var, ty))| (var.id, (local.try_into().unwrap(), ty)))
-      .collect();
-
-    let mut inss: Vec<Instruction> = vec![];
-    // We represent our closure as just its function type (without it's environment) when passing
-    // it around. This allows us to pass closures that technically have different types to the same
-    // argument as long as the functions line up. For example we want an argument of type `Int -> Int`
-    // to accept all closures with that funciton type, regardless of their environment type.
-    //
-    // Once we pass the closure into it's own definition, however, we need to recover our
-    // environment type. Our environment type is what allows us to access captured variables within
-    // the closure definition. To recover our environment type we cast our struct from just its
-    // function type back to its full type which is the function + env.
-    if let Type::ClosureEnv(closure, env) = &params[0].ty {
-      let closure_env_index = self.types.emit_closure_env_index(closure, env);
-      let casted_env_local: u32 = (params.len() + local_tys.len()).try_into().unwrap();
-      local_tys.push(closure_env_index.as_val_ty());
-      inss.extend([
-        Instruction::LocalGet(locals[&params[0].id].0),
-        Instruction::RefCastNonNull(HeapType::Concrete(closure_env_index)),
-        Instruction::LocalSet(casted_env_local),
-      ]);
-      // Overwrite our local for our env parameter to refer to our casted env.
-      locals.insert(
-        params[0].id,
-        (casted_env_local, closure_env_index.as_val_ty()),
-      );
-    }
-    for (var, defn) in body.binds {
-      inss.extend(self.emit_anf(&locals, &var.ty, defn));
-      inss.push(Instruction::LocalSet(locals[&var.id].0));
-    }
-
-    let body_ins: Vec<Instruction> = self.emit_anf(&locals, ret, body.body);
-    inss.extend(body_ins);
-    (inss, local_tys)
-  }
-
-  fn emit_definition(&mut self, definition: Definition) {
-    let (inss, local_tys) =
-      self.emit_locals(&definition.params, &definition.ret_ty, definition.body);
-
-    let mut function = Function::new_with_locals_types(local_tys);
-    for ins in inss {
-      function.instruction(&ins);
-    }
-    function.instruction(&Instruction::Return);
-    function.instruction(&Instruction::End);
-    self.code.function(&function);
-  }
-}
-
-pub fn emit_wasm(
-    definitions: Vec<(DefinitionId, Definition)>
-) -> Vec<u8> {
-  let mut types = EmitType::default();
-  let mut func = FunctionSection::new();
-  let mut export = ExportSection::new();
-
-  let functions: HashMap<DefinitionId, u32> = definitions
-    .iter()
-    .map(|(defn_id, defn)| {
-      let func_indx = func.len();
-      let type_indx = types.emit_defn_ty(defn);
-      func.function(type_indx);
-      export.export(&format!("func{}", defn_id.0), ExportKind::Func, func_indx);
-      (*defn_id, func_indx)
-    })
-    .collect();
-
-  let mut emitter = EmitWasm {
-    types,
-    func,
-    functions,
-    code: CodeSection::default(),
-  };
-  for (_, definition) in definitions {
-    emitter.emit_definition(definition);
-  }
-
-  let mut module = Module::default();
-
-  module
-    .section(&emitter.types.into_type_section())
-    .section(&emitter.func)
-    .section(&export)
-    .section(&emitter.code);
-
-  module.finish()
-}*/
 struct EmitLocals {
   next_local: u32,
-  locals: HashMap<VarId, (u32, ValType)>,
   local_tys: Vec<ValType>,
+  locals: HashMap<VarId, u32>,
 }
 
 impl EmitLocals {
-  fn param_for(&mut self, id: VarId, ty: ValType) -> u32 {
+  fn param_for(&mut self, id: VarId) -> u32 {
     let local = self.next_local;
     self.next_local += 1;
-    self.locals.insert(id, (local, ty));
+    self.locals.insert(id, local);
     local
   }
 
@@ -377,7 +179,7 @@ impl EmitLocals {
     let local = self.next_local;
     self.next_local += 1;
     self.local_tys.push(ty);
-    self.locals.insert(id, (local, ty));
+    self.locals.insert(id, local);
     local
   }
 
@@ -390,7 +192,7 @@ impl EmitLocals {
 }
 
 impl Index<&VarId> for EmitLocals {
-  type Output = (u32, ValType);
+  type Output = u32;
 
   fn index(&self, index: &VarId) -> &Self::Output {
     &self.locals[index]
@@ -399,13 +201,11 @@ impl Index<&VarId> for EmitLocals {
 
 struct EmitWasm {
   types: EmitType,
-  func: FunctionSection,
   functions: HashMap<ItemId, u32>,
-  code: CodeSection,
 }
 
 impl EmitWasm {
-  fn emit_item(&mut self, item: Item) {
+  fn emit_item(&mut self, item: Item) -> Function {
     let (inss, local_tys) = self.emit_body(&item.params, item.body);
 
     let mut function = Function::new_with_locals_types(local_tys);
@@ -414,18 +214,17 @@ impl EmitWasm {
     }
     function.instruction(&Instruction::Return);
     function.instruction(&Instruction::End);
-    self.code.function(&function);
+    function
   }
 
   fn emit_body(&mut self, params: &[Var], body: IR) -> (Vec<Instruction<'static>>, Vec<ValType>) {
     let mut locals = EmitLocals {
       next_local: 0,
-      locals: HashMap::default(),
       local_tys: vec![],
+      locals: HashMap::default(),
     };
     for param in params {
-      let val_ty = self.types.emit_val_ty(&param.ty);
-      locals.param_for(param.id, val_ty);
+      locals.param_for(param.id);
     }
     let mut inss: Vec<Instruction> = vec![];
 
@@ -433,14 +232,14 @@ impl EmitWasm {
       let closure_env_index = self.types.emit_closure_env_index(closure, env);
       let casted_env_local = locals.anon_local(closure_env_index.as_val_ty());
       inss.extend([
-        Instruction::LocalGet(locals[&params[0].id].0),
+        Instruction::LocalGet(locals[&params[0].id]),
         Instruction::RefCastNonNull(HeapType::Concrete(closure_env_index)),
         Instruction::LocalSet(casted_env_local),
       ]);
 
       locals.locals.insert(
         params[0].id,
-        (casted_env_local, closure_env_index.as_val_ty()),
+        casted_env_local,
       );
     }
 
@@ -452,7 +251,7 @@ impl EmitWasm {
   fn emit_ir(&mut self, body: IR, locals: &mut EmitLocals, inss: &mut Vec<Instruction>) {
     match body {
       IR::Var(var) => {
-        inss.push(Instruction::LocalGet(locals[&var.id].0));
+        inss.push(Instruction::LocalGet(locals[&var.id]));
       }
       IR::Int(i) => inss.push(Instruction::I32Const(i)),
       IR::Closure(ty, item_id, vars) => {
@@ -467,7 +266,7 @@ impl EmitWasm {
         inss.extend(
           vars
             .into_iter()
-            .map(|var| Instruction::LocalGet(locals[&var.id].0)),
+            .map(|var| Instruction::LocalGet(locals[&var.id])),
         );
         inss.push(Instruction::StructNew(struct_index));
         inss.push(Instruction::RefCastNonNull(heap_type));
@@ -475,7 +274,7 @@ impl EmitWasm {
       IR::Apply(fun, arg) => {
         let local_ty = fun.type_of();
         let Type::Closure(arg_ty, ret_ty) = local_ty else {
-          panic!("ICE: Expected clsoure type for function of apply");
+          panic!("ICE: Expected closure type for function of apply");
         };
         let closure_indices = self.types.emit_closure_index(&arg_ty, &ret_ty);
         self.emit_ir(*fun, locals, inss);
@@ -494,7 +293,6 @@ impl EmitWasm {
       IR::Local(var, defn, body) => {
         self.emit_ir(*defn, locals, inss);
         let val_ty = self.types.emit_val_ty(&var.ty);
-        println!("{:?} {:?}", pretty_string(var.ty, 80), val_ty);
         let local = locals.local_for(var.id, val_ty);
         inss.push(Instruction::LocalSet(local));
         self.emit_ir(*body, locals, inss);
@@ -533,24 +331,23 @@ pub fn emit_wasm(items: Vec<(ItemId, Item)>) -> Vec<u8> {
 
   let mut emitter = EmitWasm {
     types,
-    func,
     functions,
-    code: CodeSection::default(),
   };
-
+  let mut code = CodeSection::default();
   for (_, item) in items {
-    emitter.emit_item(item);
+    code.function(&emitter.emit_item(item));
   }
 
   let mut module = Module::default();
   module
     .section(&emitter.types.into_type_section())
-    .section(&emitter.func)
+    .section(&func)
     .section(&export)
-    .section(&emitter.code);
+    .section(&code);
 
   module.finish()
 }
+
 #[cfg(test)]
 mod tests {
   use crate::emit_wasm;
@@ -560,7 +357,11 @@ mod tests {
   use lowering_base::lower;
   use monomorph_base::trivial_monomorph;
   use simplify_base::simplify;
-  use types_base::{self as ast, builder::{make_vars, AstBuilder}, type_infer, Ast};
+  use types_base::{
+    self as ast,
+    builder::{make_vars, AstBuilder},
+    type_infer, Ast,
+  };
   use wasmparser::{Validator, WasmFeatures};
   use wasmprinter::PrintFmtWrite;
   use wasmtime::{Config, Engine, Linker, Module, Store};
@@ -591,21 +392,12 @@ mod tests {
       [add, h],
       b.locals(
         [
-          (
-            f,
-            b.funs([q, x], b.apps(b.var(add), [b.var(q), b.var(x)])),
-          ),
-          (
-            g,
-            b.funs([p, y], b.apps(b.var(add), [b.var(p), b.var(y)])),
-          ),
+          (f, b.funs([q, x], b.apps(b.var(add), [b.var(q), b.var(x)]))),
+          (g, b.funs([p, y], b.apps(b.var(add), [b.var(p), b.var(y)]))),
         ],
         b.apps(
           b.var(h),
-          [
-            b.app(b.var(f), b.int(3)),
-            b.app(b.var(g), b.int(5)),
-          ],
+          [b.app(b.var(f), b.int(3)), b.app(b.var(g), b.int(5))],
         ),
       ),
     );
@@ -723,21 +515,12 @@ mod tests {
       [add, x, y],
       b.locals(
         [
-          (
-            f,
-            b.fun(h, b.apps(b.var(add), [b.var(h), b.var(y)])),
-          ),
-          (
-            g,
-            b.fun(j, b.apps(b.var(add), [b.var(x), b.var(j)])),
-          ),
+          (f, b.fun(h, b.apps(b.var(add), [b.var(h), b.var(y)]))),
+          (g, b.fun(j, b.apps(b.var(add), [b.var(x), b.var(j)]))),
         ],
         b.apps(
           b.var(add),
-          [
-            b.app(b.var(f), b.int(3)),
-            b.app(b.var(g), b.int(5)),
-          ],
+          [b.app(b.var(f), b.int(3)), b.app(b.var(g), b.int(5))],
         ),
       ),
     );
@@ -811,7 +594,7 @@ mod tests {
       }
     }
 
-    env_logger::init();
+    let _ = env_logger::try_init();
 
     let (engine, mut store, mut linker) = init_wasmtime().unwrap();
     let module = Module::new(&engine, &module_bytes).unwrap();
@@ -869,6 +652,370 @@ mod tests {
       .unwrap();
     let (res,) = main.call(&mut store, ()).unwrap();
     assert_eq!(res, 16);
+  }
+
+  #[test]
+  fn test_return_closures() {
+    let b = AstBuilder::default();
+    let [add, f, x, y, z, a] = make_vars();
+    let ast = b.fun(
+      add,
+      b.locals(
+        [
+          (
+            f,
+            b.fun(
+              x,
+              b.locals(
+                [(z, b.apps(b.var(add), [b.var(x), b.int(1)]))],
+                b.fun(y, b.apps(b.var(add), [b.var(z), b.var(y)])),
+              ),
+            ),
+          ),
+          (a, b.app(b.var(f), b.int(2))),
+        ],
+        b.apps(
+          b.var(add),
+          [
+            b.apps(b.var(f), [b.int(3), b.int(4)]),
+            b.apps(b.var(a), [b.int(2)]),
+          ],
+        ),
+      ),
+    );
+
+    let module_bytes = wasm_module_of(ast);
+
+    let mut wat = wasmprinter::PrintFmtWrite(String::new());
+    let mut config = wasmprinter::Config::new();
+    config
+      .fold_instructions(true)
+      .indent_text("  ")
+      .print(&module_bytes, &mut wat)
+      .expect("Printing WAT failed");
+    let expect = expect![[r#"
+        (module
+          (type (;0;) (func (param (ref struct) i32) (result i32)))
+          (type (;1;) (sub (struct (field (ref 0)))))
+          (type (;2;) (func (param (ref struct) i32) (result (ref 1))))
+          (type (;3;) (sub (struct (field (ref 2)))))
+          (type (;4;) (func (param (ref 3)) (result i32)))
+          (type (;5;) (sub final 1 (struct (field (ref 0)) (field (ref 3)) (field i32))))
+          (type (;6;) (sub final 3 (struct (field (ref 2)) (field (ref 3)))))
+          (export "func0" (func 0))
+          (export "func1" (func 1))
+          (export "func2" (func 2))
+          (func (;0;) (type 0) (param (ref struct) i32) (result i32)
+            (local (ref 5) i32 (ref 3) (ref 3) (ref 1))
+            (local.set 2
+              (ref.cast (ref 5)
+                (local.get 0)))
+            (local.set 3
+              (struct.get 5 2
+                (local.get 2)))
+            (local.set 4
+              (struct.get 5 1
+                (local.get 2)))
+            (return
+              (call_ref 0
+                (local.tee 6
+                  (call_ref 2
+                    (local.tee 5
+                      (local.get 4))
+                    (local.get 3)
+                    (struct.get 3 0
+                      (local.get 5))))
+                (local.get 1)
+                (struct.get 1 0
+                  (local.get 6))))
+          )
+          (func (;1;) (type 2) (param (ref struct) i32) (result (ref 1))
+            (local (ref 6) (ref 3) (ref 3) (ref 1) i32)
+            (local.set 2
+              (ref.cast (ref 6)
+                (local.get 0)))
+            (local.set 3
+              (struct.get 6 1
+                (local.get 2)))
+            (local.set 6
+              (call_ref 0
+                (local.tee 5
+                  (call_ref 2
+                    (local.tee 4
+                      (local.get 3))
+                    (local.get 1)
+                    (struct.get 3 0
+                      (local.get 4))))
+                (i32.const 1)
+                (struct.get 1 0
+                  (local.get 5))))
+            (return
+              (ref.cast (ref 1)
+                (struct.new 5
+                  (ref.func 0)
+                  (local.get 3)
+                  (local.get 6))))
+          )
+          (func (;2;) (type 4) (param (ref 3)) (result i32)
+            (local (ref 3) (ref 3) (ref 3) (ref 1) (ref 1) (ref 3) (ref 1))
+            (local.set 1
+              (ref.cast (ref 3)
+                (struct.new 6
+                  (ref.func 1)
+                  (local.get 0))))
+            (return
+              (call_ref 0
+                (local.tee 5
+                  (call_ref 2
+                    (local.tee 2
+                      (local.get 0))
+                    (call_ref 0
+                      (local.tee 4
+                        (call_ref 2
+                          (local.tee 3
+                            (local.get 1))
+                          (i32.const 3)
+                          (struct.get 3 0
+                            (local.get 3))))
+                      (i32.const 4)
+                      (struct.get 1 0
+                        (local.get 4)))
+                    (struct.get 3 0
+                      (local.get 2))))
+                (call_ref 0
+                  (local.tee 7
+                    (call_ref 2
+                      (local.tee 6
+                        (local.get 1))
+                      (i32.const 2)
+                      (struct.get 3 0
+                        (local.get 6))))
+                  (i32.const 2)
+                  (struct.get 1 0
+                    (local.get 7)))
+                (struct.get 1 0
+                  (local.get 5))))
+          )
+        )
+    "#]];
+    expect.assert_eq(&wat.0);
+
+    let mut validator = Validator::new_with_features(WasmFeatures::default());
+    match validator.validate_all(&module_bytes) {
+      Ok(_) => {}
+      Err(err) => {
+        let mut wat = wasmprinter::PrintFmtWrite(String::new());
+        config
+          .print_offsets(true)
+          .print(&module_bytes, &mut wat)
+          .unwrap();
+        panic!("{}\n{}", &wat.0, err);
+      }
+    }
+
+    let _ = env_logger::try_init();
+
+    let (engine, mut store, mut linker) = init_wasmtime().unwrap();
+    let module = Module::new(&engine, &module_bytes).unwrap();
+    linker.module(&mut store, "test", &module).unwrap();
+
+    let str = r#"
+        (module
+          (type $add-inner-func (;0;) (func (param (ref struct) i32) (result i32)))
+          (type $add-inner-clos (;1;) (sub (struct (field (ref 0)))))
+          (type $add-func (;2;) (func (param (ref struct) i32) (result (ref 1))))
+          (type $add-clos (;3;) (sub (struct (field (ref 2)))))
+          (type $func0-func (;4;) (func (param (ref 3)) (result i32)))
+          (type $add-inner-env (sub final $add-inner-clos (struct (field $code (ref $add-inner-func)) (field $a i32))))
+          (type $main-func (func (result i32)))
+          (import "test" "func2" (func $func0 (type $func0-func)))
+          (export "main" (func $main))
+          (export "add" (func $add))
+          (export "add-inner" (func $add-inner))
+          (func $add-inner (type $add-inner-func) (param $clos (ref struct)) (param $b i32) (result i32)
+            (local $env (ref $add-inner-env))
+            (local.set $env
+             (ref.cast (ref $add-inner-env)
+              (local.get $clos)))
+            (i32.add
+              (struct.get $add-inner-env $a (local.get $env))
+              (local.get $b)))
+          (func $add (type $add-func) (param $clos (ref struct)) (param $a i32) (result (ref $add-inner-clos))
+            (struct.new $add-inner-env
+              (ref.func $add-inner)
+              (local.get $a)))
+          (func $main (type $main-func) (result i32)
+           (call $func0
+            (struct.new $add-clos
+             (ref.func $add)))))
+"#;
+    let other_module = Module::new(&engine, str)
+      .inspect_err(|_| {
+        let x = wat::parse_str(str).unwrap();
+        let mut s = PrintFmtWrite(String::new());
+        wasmprinter::Config::new()
+          .fold_instructions(false)
+          .print_offsets(true)
+          .indent_text("  ")
+          .print(&x, &mut s)
+          .unwrap();
+        println!("{}", s.0);
+      })
+      .unwrap();
+
+    let inst = linker.instantiate(&mut store, &other_module).unwrap();
+    let main = inst
+      .get_typed_func::<(), (i32,)>(&mut store, "main")
+      .unwrap();
+    let (res,) = main.call(&mut store, ()).unwrap();
+    assert_eq!(res, 13);
+  }
+
+  #[test]
+  fn test_example() {
+    let b = AstBuilder::default();
+    let [add, f, x] = make_vars();
+    let ast = b.fun(
+      add,
+      b.locals(
+        [
+          (
+            f,
+            b.apps(b.var(add), [b.int(1)])
+          ),
+        ],
+        b.apps(
+          b.var(add),
+          [
+            b.apps(b.var(f), [b.int(400)]),
+            b.apps(b.var(f), [b.int(1234)]),
+          ],
+        ),
+      ),
+    );
+
+    let module_bytes = wasm_module_of(ast);
+
+    let mut wat = wasmprinter::PrintFmtWrite(String::new());
+    let mut config = wasmprinter::Config::new();
+    config
+      .fold_instructions(true)
+      .indent_text("  ")
+      .print(&module_bytes, &mut wat)
+      .expect("Printing WAT failed");
+    let expect = expect![[r#"
+        (module
+          (type (;0;) (func (param (ref struct) i32) (result i32)))
+          (type (;1;) (sub (struct (field (ref 0)))))
+          (type (;2;) (func (param (ref struct) i32) (result (ref 1))))
+          (type (;3;) (sub (struct (field (ref 2)))))
+          (type (;4;) (func (param (ref 3)) (result i32)))
+          (export "func0" (func 0))
+          (func (;0;) (type 4) (param (ref 3)) (result i32)
+            (local (ref 3) (ref 1) (ref 3) (ref 1) (ref 1) (ref 1))
+            (local.set 2
+              (call_ref 2
+                (local.tee 1
+                  (local.get 0))
+                (i32.const 1)
+                (struct.get 3 0
+                  (local.get 1))))
+            (return
+              (call_ref 0
+                (local.tee 5
+                  (call_ref 2
+                    (local.tee 3
+                      (local.get 0))
+                    (call_ref 0
+                      (local.tee 4
+                        (local.get 2))
+                      (i32.const 400)
+                      (struct.get 1 0
+                        (local.get 4)))
+                    (struct.get 3 0
+                      (local.get 3))))
+                (call_ref 0
+                  (local.tee 6
+                    (local.get 2))
+                  (i32.const 1234)
+                  (struct.get 1 0
+                    (local.get 6)))
+                (struct.get 1 0
+                  (local.get 5))))
+          )
+        )
+    "#]];
+    expect.assert_eq(&wat.0);
+
+    let mut validator = Validator::new_with_features(WasmFeatures::default());
+    match validator.validate_all(&module_bytes) {
+      Ok(_) => {}
+      Err(err) => {
+        let mut wat = wasmprinter::PrintFmtWrite(String::new());
+        config
+          .print_offsets(true)
+          .print(&module_bytes, &mut wat)
+          .unwrap();
+        panic!("{}\n{}", &wat.0, err);
+      }
+    }
+
+    let _ = env_logger::try_init();
+
+    let (engine, mut store, mut linker) = init_wasmtime().unwrap();
+    let module = Module::new(&engine, &module_bytes).unwrap();
+    linker.module(&mut store, "test", &module).unwrap();
+
+    let str = r#"
+        (module
+          (type $add-inner-func (;0;) (func (param (ref struct) i32) (result i32)))
+          (type $add-inner-clos (;1;) (sub (struct (field (ref 0)))))
+          (type $add-func (;2;) (func (param (ref struct) i32) (result (ref 1))))
+          (type $add-clos (;3;) (sub (struct (field (ref 2)))))
+          (type $func0-func (;4;) (func (param (ref 3)) (result i32)))
+          (type $add-inner-env (sub final $add-inner-clos (struct (field $code (ref $add-inner-func)) (field $a i32))))
+          (type $main-func (func (result i32)))
+          (import "test" "func0" (func $func0 (type $func0-func)))
+          (export "main" (func $main))
+          (export "add" (func $add))
+          (export "add-inner" (func $add-inner))
+          (func $add-inner (type $add-inner-func) (param $clos (ref struct)) (param $b i32) (result i32)
+            (local $env (ref $add-inner-env))
+            (local.set $env
+             (ref.cast (ref $add-inner-env)
+              (local.get $clos)))
+            (i32.add
+              (struct.get $add-inner-env $a (local.get $env))
+              (local.get $b)))
+          (func $add (type $add-func) (param $clos (ref struct)) (param $a i32) (result (ref $add-inner-clos))
+            (struct.new $add-inner-env
+              (ref.func $add-inner)
+              (local.get $a)))
+          (func $main (type $main-func) (result i32)
+           (call $func0
+            (struct.new $add-clos
+             (ref.func $add)))))
+"#;
+    let other_module = Module::new(&engine, str)
+      .inspect_err(|_| {
+        let x = wat::parse_str(str).unwrap();
+        let mut s = PrintFmtWrite(String::new());
+        wasmprinter::Config::new()
+          .fold_instructions(false)
+          .print_offsets(true)
+          .indent_text("  ")
+          .print(&x, &mut s)
+          .unwrap();
+        println!("{}", s.0);
+      })
+      .unwrap();
+
+    let inst = linker.instantiate(&mut store, &other_module).unwrap();
+    let main = inst
+      .get_typed_func::<(), (i32,)>(&mut store, "main")
+      .unwrap();
+    let (res,) = main.call(&mut store, ()).unwrap();
+    assert_eq!(res, 1636);
   }
 
   fn init_wasmtime() -> Result<(Engine, Store<()>, Linker<()>), wasmtime::Error> {

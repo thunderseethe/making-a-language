@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use dashmap::DashMap;
 use desugar_base::{DesugarError, ErrorKind, SyncNode};
 use name_resolution_base::NameResolutionError;
-use parser_base::{ParseError, Cst};
+use parser_base::{Cst, ParseError};
 use tower_lsp_server::lsp_types::{Diagnostic, Position, Range as LspRange, Uri};
 use types_base::{Ast, NodeId, TypeError, TypeErrorKind, TypeScheme, TypedVar, Var};
 use wasm_bindgen::JsValue;
@@ -354,7 +354,9 @@ impl Database {
               match desugar.kind {
                 ErrorKind::MissingSyntax(node) => format!("Expected node {:?}", node),
                 ErrorKind::ProgramMissingExpr => "Program missing expression node".to_string(),
-                ErrorKind::ExpectedLetOrAppInExpr(syntax) => format!("Expected let or app node, but encountered {:?}", syntax),
+                ErrorKind::ExpectedLetOrAppInExpr(syntax) => {
+                  format!("Expected let or app node, but encountered {:?}", syntax)
+                }
                 ErrorKind::LetMissingBinding => "Let missing a variable".to_string(),
                 ErrorKind::LetMissingExpr => "Let missing a rhs expr".to_string(),
                 ErrorKind::Unexpected(vec) => format!("Unexpected {:?}", vec), //TODO: Format this
@@ -363,8 +365,12 @@ impl Database {
                 ErrorKind::FunMissingIdentifier => "Function missing a variable".to_string(),
                 ErrorKind::FunMissingExpr => "Function missing a body".to_string(),
                 ErrorKind::EmptyApplication => "Expected application but it was empty".to_string(),
-                ErrorKind::VarMissingIdentifier => "Expected variable to contain an identifier token".to_string(), 
-                ErrorKind::IntegerExprMissingInt => "Expected integer expr to contain an int token".to_string(),
+                ErrorKind::VarMissingIdentifier => {
+                  "Expected variable to contain an identifier token".to_string()
+                }
+                ErrorKind::IntegerExprMissingInt => {
+                  "Expected integer expr to contain an int token".to_string()
+                }
               },
             )]
           }
@@ -384,7 +390,7 @@ impl Database {
             )]
           }
           PellucidError::Types(types) => {
-            let (_, ast_to_cst) = self
+            let (ast, ast_to_cst) = self
               .desugar_of(uri.clone())
               .expect("We can be sure this is Ok(_) otherwise we'd hit DesugarError case above");
             web_sys::console::log_1(&JsValue::from_str(&format!("{:?}", self.colors)));
@@ -394,6 +400,15 @@ impl Database {
                 .expect("error span outside range"),
               match types.kind {
                 TypeErrorKind::TypeNotEqual(left, right) => {
+                  let node = ast
+                    .find(types.node_id)
+                    .expect("Node id is missing an AST node");
+                  match node {
+                    Ast::Var(node_id, _) => todo!(),
+                    Ast::Int(node_id, _) => todo!(),
+                    Ast::Fun(node_id, _, ast) => todo!(),
+                    Ast::App(node_id, ast, ast1) => todo!(),
+                  }
                   format!("Types are not equal: {:?} != {:?}", left, right)
                 }
                 TypeErrorKind::InfiniteType(type_var, ty) => format!(
@@ -404,6 +419,30 @@ impl Database {
             )]
           }
         }
+      }
+    }
+  }
+}
+
+trait Find {
+  fn find(&self, id: NodeId) -> Option<&Self>;
+}
+impl<T> Find for Ast<T> {
+  fn find(&self, id: NodeId) -> Option<&Ast<T>> {
+    match self {
+      Ast::Var(node_id, _) => (node_id == &id).then_some(self),
+      Ast::Int(node_id, _) => (node_id == &id).then_some(self),
+      Ast::Fun(node_id, _, body) => {
+        if node_id == &id {
+          return Some(self);
+        }
+        body.find(id)
+      }
+      Ast::App(node_id, fun, arg) => {
+        if node_id == &id {
+          return Some(self);
+        }
+        fun.find(id).or_else(|| arg.find(id))
       }
     }
   }
