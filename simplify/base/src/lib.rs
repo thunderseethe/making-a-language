@@ -663,8 +663,6 @@ mod tests {
 
     let ir = simplify(ast);
 
-    panic!("fail me");
-
     let expect = expect_test::expect!["1"];
     expect.assert_eq(&pretty_string(ir, 80));
   }

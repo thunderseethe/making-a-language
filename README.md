@@ -20,3 +20,5 @@ The stages in the compiler:
   * [base](/monomorph/base) - Monomorphizing our base IR.
 * [closure_convert](/closure_convert) - Closure conversion removes functions from our IR.
   * [base](/closure_convert/base) - Closure convert our base IR.
+* [emit](/emit) - Code emission targeting WebAssembly
+  * [base](/emit/base) - Emit Wasm for our closure-converted base IR.

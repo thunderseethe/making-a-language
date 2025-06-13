@@ -28,8 +28,3 @@ pub fn trivial_monomorph(ir: IR) -> IR {
   }
   instantiate(ir, types)
 }
-
-#[cfg(test)]
-mod tests {
-  use super::*;
-}

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "emit/base",
   "closure_convert/base",
   "lowering/base",
   "lowering/rows",
@@ -18,6 +19,7 @@ types-items = { path = "types/items" }
 lowering-base = { path = "lowering/base" }
 simplify-base = { path = "simplify/base" }
 monomorph-base = { path = "monomorph/base" }
+closure-convert-base = { path="closure_convert/base" }
 ena = "0.14.2"
 im = "15.1"
 pretty_assertions = "1.4"
