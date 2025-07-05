@@ -41,7 +41,7 @@ expect-test = "1.5.1"
 im = "15.1"
 pretty_assertions = "1.4"
 pretty = "0.12.3"
-wasmtime = "31" 
+wasmtime = "34" 
 
 [dependencies]
 parser-base.workspace = true
