@@ -1,16 +1,10 @@
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use closure_convert_base::{closure_convert, ItemId};
-use dashmap::DashMap;
-use desugar_base::{desugar, DesugarError, ErrorKind};
-use emit_base::emit_wasm;
-use lowering_base::{self as ir, lower};
-use monomorph_base::trivial_monomorph;
-use name_resolution_base::{name_resolution, NameResolutionError};
+use desugar_base::DesugarError;
+use name_resolution_base::NameResolutionError;
 use parser_base::rowan::NodeOrToken;
 use parser_base::{all_syntax, Lang, Syntax, SyntaxNode};
-use simplify_base::simplify;
 
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::lsp_types::{
@@ -20,14 +14,13 @@ use tower_lsp_server::lsp_types::{
   TextDocumentSyncCapability, TextDocumentSyncKind,
 };
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
-use types_base::{type_infer, TypeError, TypeErrorKind};
+use types_base::TypeError;
 
 use wasm_bindgen::prelude::*;
 use wasm_streams::{ReadableStream, WritableStream};
 
 mod queries;
 use queries::Database;
-use web_sys::js_sys;
 
 pub enum CompilerError {
   Desugar(DesugarError),
