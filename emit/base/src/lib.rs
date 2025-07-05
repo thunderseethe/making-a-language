@@ -874,7 +874,7 @@ mod tests {
   #[test]
   fn test_example() {
     let b = AstBuilder::default();
-    let [add, f, x] = make_vars();
+    let [add, f] = make_vars();
     let ast = b.fun(
       add,
       b.locals(

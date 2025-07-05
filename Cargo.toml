@@ -1,7 +1,7 @@
 [package]
 name = "making-a-language"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [workspace]
 members = [
@@ -20,6 +20,9 @@ members = [
   "name_resolution/base", 
   "compiler/base",
 ]
+
+[workspace.package]
+edition = "2024"
 
 [workspace.dependencies]
 types-base = { path = "types/base" }

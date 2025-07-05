@@ -635,11 +635,11 @@ impl LowerSolvedEv<'_> {
     })
   }
 
-  fn left_enumerated_values(&self) -> impl Iterator<Item = (usize, Type)> {
+  fn left_enumerated_values(&self) -> impl Iterator<Item = (usize, Type)> + use<> {
     self.left_indices.clone().into_iter().zip(self.left.clone())
   }
 
-  fn right_enumerated_values(&self) -> impl Iterator<Item = (usize, Type)> {
+  fn right_enumerated_values(&self) -> impl Iterator<Item = (usize, Type)> + use<> {
     self
       .right_indices
       .clone()
