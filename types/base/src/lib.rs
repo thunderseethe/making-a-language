@@ -31,7 +31,7 @@ pub enum Ast<V> {
 }
 
 impl<V> Ast<V> {
-  fn id(&self) -> NodeId {
+  pub fn id(&self) -> NodeId {
     match self {
       Ast::Var(node_id, _)
       | Ast::Int(node_id, _)

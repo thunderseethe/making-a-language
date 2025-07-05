@@ -8,3 +8,4 @@ edition = "2021"
 [dependencies]
 ena.workspace = true
 im.workspace = true
+pretty.workspace = true

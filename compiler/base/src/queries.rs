@@ -7,7 +7,7 @@ use desugar_base::{DesugarError, ErrorKind, SyncNode};
 use name_resolution_base::NameResolutionError;
 use parser_base::{Cst, ParseError};
 use tower_lsp_server::lsp_types::{Diagnostic, Position, Range as LspRange, Uri};
-use types_base::{Ast, NodeId, TypeError, TypeErrorKind, TypeScheme, TypedVar, Var};
+use types_base::{Ast, NodeId, Type, TypeError, TypeErrorKind, TypeScheme, TypedVar, Var};
 use wasm_bindgen::JsValue;
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
@@ -394,29 +394,44 @@ impl Database {
               .desugar_of(uri.clone())
               .expect("We can be sure this is Ok(_) otherwise we'd hit DesugarError case above");
             web_sys::console::log_1(&JsValue::from_str(&format!("{:?}", self.colors)));
-            vec![Diagnostic::new_simple(
-              newlines
-                .lsp_range_for(ast_to_cst[&types.node_id].span.into())
-                .expect("error span outside range"),
-              match types.kind {
-                TypeErrorKind::TypeNotEqual(left, right) => {
-                  let node = ast
-                    .find(types.node_id)
-                    .expect("Node id is missing an AST node");
-                  match node {
-                    Ast::Var(node_id, _) => todo!(),
-                    Ast::Int(node_id, _) => todo!(),
-                    Ast::Fun(node_id, _, ast) => todo!(),
-                    Ast::App(node_id, ast, ast1) => todo!(),
+            vec![match types.kind {
+              TypeErrorKind::TypeNotEqual(left, right) => {
+                let ast_node = ast
+                  .find(types.node_id)
+                  .expect("Node id is missing an AST node");
+                match ast_node {
+                  Ast::Var(_, _) => {},
+                  Ast::Int(_, _) => {},
+                  Ast::Fun(_, _, _) => {},
+                  Ast::App(_, _, arg) => {
+                    if let (Type::Fun(_, _), arg_ty) = (&left, &right) {
+                      let cst = &ast_to_cst[&arg.id()];
+                      return vec![Diagnostic::new_simple(
+                        newlines
+                          .lsp_range_for(cst.span.into())
+                          .expect("error span outside range"),
+                        format!("Unexpected argument of type {:?}", arg_ty),
+                      )];
+                    }
                   }
-                  format!("Types are not equal: {:?} != {:?}", left, right)
-                }
-                TypeErrorKind::InfiniteType(type_var, ty) => format!(
+                };
+                Diagnostic::new_simple(
+                  newlines
+                    .lsp_range_for(ast_to_cst[&types.node_id].span.into())
+                    .expect("error span outside range"),
+                  format!("Types are not equal: {:?} != {:?}", left, right),
+                )
+              }
+              TypeErrorKind::InfiniteType(type_var, ty) => Diagnostic::new_simple(
+                newlines
+                  .lsp_range_for(ast_to_cst[&types.node_id].span.into())
+                  .expect("error span outside range"),
+                format!(
                   "Tried to solve variable {:?} to infinite type {:?}",
                   type_var, ty
                 ),
-              },
-            )]
+              ),
+            }]
           }
         }
       }
