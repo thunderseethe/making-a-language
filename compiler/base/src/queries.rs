@@ -10,6 +10,8 @@ use tower_lsp_server::lsp_types::{Diagnostic, Position, Range as LspRange, Uri};
 use types_base::{Ast, NodeId, Type, TypeError, TypeErrorKind, TypeScheme, TypedVar, Var};
 use wasm_bindgen::JsValue;
 
+use self::prettyprint::prettyprint_ty;
+
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum Color {
   Red,
@@ -400,26 +402,45 @@ impl Database {
                   .find(types.node_id)
                   .expect("Node id is missing an AST node");
                 match ast_node {
-                  Ast::Var(_, _) => {},
-                  Ast::Int(_, _) => {},
-                  Ast::Fun(_, _, _) => {},
-                  Ast::App(_, _, arg) => {
+                  Ast::Var(_, _) => {}
+                  Ast::Int(_, _) => {}
+                  Ast::Fun(_, _, _) => {}
+                  Ast::App(id, fun, arg) => {
+                    // Our function is applied to too many arguments.
                     if let (Type::Fun(_, _), arg_ty) = (&left, &right) {
-                      let cst = &ast_to_cst[&arg.id()];
+                      // Our app node maps back to our overarching CST app node.
+                      // But we have enough information to narrow the span of our diagnostic, so we
+                      // construct our span manually.
+                      let left_cst = &ast_to_cst[&fun.id()];
+                      let right_cst = &ast_to_cst[&arg.id()];
                       return vec![Diagnostic::new_simple(
                         newlines
-                          .lsp_range_for(cst.span.into())
+                          .lsp_range_for(left_cst.span.cover(right_cst.span).into())
                           .expect("error span outside range"),
-                        format!("Unexpected argument of type {:?}", arg_ty),
+                        format!(
+                          "Expected this to be a function but it has type {}",
+                          prettyprint_ty(arg_ty)
+                        ),
                       )];
                     }
+
+                    // Otherwise, assume the error is an invalid argument type.
+                    let Some(Ast::App(_, _, parent_arg)) = ast.parent_of(*id) else {
+                      todo!("Proper error handling");
+                    };
+                    return vec![Diagnostic::new_simple(
+                      newlines
+                        .lsp_range_for(ast_to_cst[&parent_arg.id()].span.into())
+                        .expect("error span outside range"),
+                      format!("Expected argument of type {} but got {}", prettyprint_ty(&left), prettyprint_ty(&right)),
+                    )];
                   }
                 };
                 Diagnostic::new_simple(
                   newlines
                     .lsp_range_for(ast_to_cst[&types.node_id].span.into())
                     .expect("error span outside range"),
-                  format!("Types are not equal: {:?} != {:?}", left, right),
+                  format!("Types are not equal: {} != {}", prettyprint_ty(&left), prettyprint_ty(&right)),
                 )
               }
               TypeErrorKind::InfiniteType(type_var, ty) => Diagnostic::new_simple(
@@ -458,6 +479,74 @@ impl<T> Find for Ast<T> {
           return Some(self);
         }
         fun.find(id).or_else(|| arg.find(id))
+      }
+    }
+  }
+}
+
+mod prettyprint {
+  use std::collections::HashMap;
+
+  use pretty::{DocAllocator, DocBuilder, RcAllocator};
+  use types_base::{Type, TypeVar};
+
+  pub fn prettyprint_ty(ty: &Type) -> String {
+    let mut pp = PrettyprintType::new();
+    let doc = pp.pretty(ty, &RcAllocator);
+    let mut out = String::new();
+    doc.render_fmt(80, &mut out).unwrap();
+    out
+  }
+
+  struct PrettyprintType {
+    ty_var_names: Box<dyn Iterator<Item = String>>,
+    ty_vars: HashMap<TypeVar, String>,
+  }
+  impl PrettyprintType {
+    fn new() -> Self {
+        Self {
+            ty_var_names: Box::new(('\u{03C1}'..='\u{03D9}').map(|c| c.to_string())),
+            ty_vars: HashMap::default(),
+        }
+    }
+
+    fn pretty_var<'a>(
+      &mut self,
+      ty_var: TypeVar,
+      a: &'a RcAllocator,
+    ) -> DocBuilder<'a, RcAllocator> {
+      a.text(
+        self
+          .ty_vars
+          .entry(ty_var)
+          .or_insert_with(|| {
+            let Some(name) = self.ty_var_names.next() else {
+              todo!("Error handling");
+            };
+            name
+          })
+          .clone(),
+      )
+    }
+    fn pretty<'a>(&mut self, ty: &Type, a: &'a RcAllocator) -> DocBuilder<'a, RcAllocator> {
+      fn requires_parens(ty: &Type) -> bool {
+        matches!(ty, Type::Fun(_, _))
+      }
+      match ty {
+        Type::Int => a.text("Int"),
+        Type::Var(type_var) => self.pretty_var(*type_var, a),
+        Type::Fun(arg_ty, ret_ty) => {
+          let mut arg = self.pretty(arg_ty, a).clone();
+          let ret = self.pretty(ret_ty, a).clone();
+          if requires_parens(arg_ty) {
+            arg = arg.parens();
+          }
+          arg
+            .append(a.space().clone())
+            .append("->")
+            .append(a.space().clone())
+            .append(ret)
+        }
       }
     }
   }
