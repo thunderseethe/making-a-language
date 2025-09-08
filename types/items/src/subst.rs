@@ -77,13 +77,15 @@ impl TypeInference {
       Row::Unifier(var) => {
         let root = self.row_unification_table.find(var);
         match self.row_unification_table.probe_value(root) {
-          Some(Row::Unifier(_)) => panic!("Unexpected open row found as value of row unification table. This variable should've been `unify_var_var()`, not `unify_var_value()`"),
+          Some(Row::Unifier(_)) => panic!(
+            "Unexpected open row found as value of row unification table. This variable should've been `unify_var_var()`, not `unify_var_value()`"
+          ),
           Some(Row::Open(v)) => SubstOut::new(Row::Open(v)),
           Some(Row::Closed(row)) => self.substitute_closedrow(row).map(Row::Closed),
           None => {
-              let rowvar = self.rowvar_for_unifier(root);
-              SubstOut::new(Row::Open(rowvar)).with_unbound_row(rowvar)
-          },
+            let rowvar = self.rowvar_for_unifier(root);
+            SubstOut::new(Row::Open(rowvar)).with_unbound_row(rowvar)
+          }
         }
       }
       Row::Open(v) => SubstOut::new(Row::Open(v)),
@@ -135,7 +137,7 @@ impl TypeInference {
     }
   }
 
-  pub(crate) fn substitute_ast(&mut self, ast: Ast<TypedVar>) -> SubstOut<Ast<TypedVar>> { 
+  pub(crate) fn substitute_ast(&mut self, ast: Ast<TypedVar>) -> SubstOut<Ast<TypedVar>> {
     match ast {
       Ast::Var(id, v) => self
         .substitute_ty(v.1)
@@ -179,10 +181,7 @@ impl TypeInference {
     }
   }
 
-  pub(crate) fn substitute_wrapper(
-    &mut self,
-    wrapper: ItemWrapper,
-  ) -> SubstOut<ItemWrapper> {
+  pub(crate) fn substitute_wrapper(&mut self, wrapper: ItemWrapper) -> SubstOut<ItemWrapper> {
     fn transpose<T>(vec: Vec<SubstOut<T>>) -> SubstOut<Vec<T>> {
       let mut subst = SubstOut::new(vec![]);
       for ele in vec {
@@ -218,12 +217,10 @@ impl TypeInference {
           .map(|ev| self.substitute_evidence(ev))
           .collect(),
       ),
-      |(types, rows), evidence| {
-        ItemWrapper {
-          types,
-          rows,
-          evidence,
-        }
+      |(types, rows), evidence| ItemWrapper {
+        types,
+        rows,
+        evidence,
       },
     )
   }

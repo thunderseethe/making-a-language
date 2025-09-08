@@ -104,8 +104,9 @@ impl TypeInference {
         let value_var = self.fresh_ty_var();
         let expected_ty = Type::label(label.clone(), Type::Var(value_var));
         let out = self.check(env, *value, expected_ty);
-        ( out.with_typed_ast(|ast| Ast::unlabel(id, ast, label))
-        , Type::Var(value_var)
+        (
+          out.with_typed_ast(|ast| Ast::unlabel(id, ast, label)),
+          Type::Var(value_var),
         )
       }
       // Products
@@ -126,11 +127,7 @@ impl TypeInference {
         constraints.push(Constraint::RowCombine(id, row_comb.clone()));
         self.row_to_combo.insert(id, row_comb);
 
-        let typed_ast = Ast::concat(
-          id, 
-          left_out.typed_ast,
-          right_out.typed_ast,
-        );
+        let typed_ast = Ast::concat(id, left_out.typed_ast, right_out.typed_ast);
 
         (
           InferOut {
@@ -195,11 +192,7 @@ impl TypeInference {
         (
           InferOut {
             constraints,
-            typed_ast: Ast::branch(
-              id,
-              left_out.typed_ast,
-              right_out.typed_ast,
-            ),
+            typed_ast: Ast::branch(id, left_out.typed_ast, right_out.typed_ast),
           },
           out_ty,
         )
@@ -272,11 +265,7 @@ impl TypeInference {
         constraints.push(Constraint::RowCombine(id, row_comb.clone()));
         self.row_to_combo.insert(id, row_comb);
 
-        let typed_ast = Ast::concat(
-          id,
-          left_out.typed_ast,
-          right_out.typed_ast,
-        );
+        let typed_ast = Ast::concat(id, left_out.typed_ast, right_out.typed_ast);
 
         InferOut {
           constraints,
@@ -341,11 +330,7 @@ impl TypeInference {
 
         InferOut {
           constraints,
-          typed_ast: Ast::branch(
-            id,
-            left_out.typed_ast,
-            right_out.typed_ast,
-          ),
+          typed_ast: Ast::branch(id, left_out.typed_ast, right_out.typed_ast),
         }
       }
       (Ast::Inject(id, dir, value), Type::Sum(goal)) => {

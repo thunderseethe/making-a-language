@@ -1007,7 +1007,7 @@ fn pretty_string<'a>(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use types_rows::{self as ast, builder::AstBuilder, type_infer, Ast};
+  use types_rows::{self as ast, Ast, builder::AstBuilder, type_infer};
 
   fn lower_test(ast: Ast<ast::Var>) -> (IR, Type) {
     let out = type_infer(ast).expect("Type inference to succeed");
@@ -1149,7 +1149,7 @@ mod tests {
     let b = AstBuilder::default();
     let ast = b.concat(
       b.concat(b.label("x", b.int(1)), b.label("y", b.int(2))),
-      b.concat(b.label("a", b.fun(m, b.var(m))), b.label("z", b.int(3)))
+      b.concat(b.label("a", b.fun(m, b.var(m))), b.label("z", b.int(3))),
     );
 
     let (ir, ir_ty) = lower_test(ast);
@@ -1226,12 +1226,15 @@ mod tests {
     let ast = b.branch(
       b.branch(
         b.fun(ast::Var(0), b.unlabel(b.var(ast::Var(0)), "x")),
-        b.fun(ast::Var(1), b.unlabel(b.var(ast::Var(1)), "y"))
+        b.fun(ast::Var(1), b.unlabel(b.var(ast::Var(1)), "y")),
       ),
       b.branch(
-        b.fun(ast::Var(2), b.app(b.unlabel(b.var(ast::Var(2)), "a"), b.int(1))), 
-        b.fun(ast::Var(3), b.unlabel(b.var(ast::Var(3)), "z"))
-      )
+        b.fun(
+          ast::Var(2),
+          b.app(b.unlabel(b.var(ast::Var(2)), "a"), b.int(1)),
+        ),
+        b.fun(ast::Var(3), b.unlabel(b.var(ast::Var(3)), "z")),
+      ),
     );
 
     let (ir, ir_ty) = lower_test(ast);

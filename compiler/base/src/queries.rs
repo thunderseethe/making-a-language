@@ -1,16 +1,30 @@
 use std::collections::HashMap;
+use std::fmt::Debug;
+use std::hash::Hash;
 use std::ops::Range;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{
+  Arc,
+  atomic::{AtomicUsize, Ordering},
+};
 
+use closure_convert_base::ItemId;
 use dashmap::DashMap;
-use desugar_base::{DesugarError, ErrorKind, SyncNode};
+use desugar_base::{DesugarError, SyncNode};
+use lowering_base::{IR, LowerOut};
 use name_resolution_base::NameResolutionError;
-use parser_base::{Cst, ParseError};
-use tower_lsp_server::lsp_types::{Diagnostic, Position, Range as LspRange, Uri};
-use types_base::{Ast, NodeId, Type, TypeError, TypeErrorKind, TypeScheme, TypedVar, Var};
-use wasm_bindgen::JsValue;
+use parser_base::rowan::NodeOrToken;
+use parser_base::rowan::ast::SyntaxNodePtr;
+use parser_base::{Cst, Lang, ParseError, SyntaxNode, rowan::TextSize};
+use parser_base::{Syntax, SyntaxToken};
+use serde_json::json;
+use tower_lsp_server::lsp_types::{
+  CompletionItem, CompletionItemKind, CompletionResponse, Diagnostic, Hover, HoverContents, LSPAny,
+  LanguageString, MarkedString, Position, Range as LspRange, Uri,
+};
+use types_base::{Ast, Mark, NodeId, Type, TypeScheme, TypedVar, Var};
 
-use self::prettyprint::prettyprint_ty;
+use self::graph::DepGraph;
+use self::prettyprint::{PrettyprintType, prettyprint_ty};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum Color {
@@ -36,14 +50,98 @@ impl ColorMap {
   }
 }
 
+pub(crate) mod graph {
+  use dashmap::DashMap;
+  use parking_lot::RwLock;
+  use petgraph::graph::{DiGraph, NodeIndex};
+
+  use super::QueryKey;
+
+  #[derive(Default, Debug)]
+  pub(crate) struct DepGraph {
+    graph: RwLock<DiGraph<QueryKey, ()>>,
+    indices: DashMap<QueryKey, NodeIndex>,
+  }
+  impl DepGraph {
+    pub(crate) fn add_dependency(&self, from: QueryKey, to: QueryKey) {
+      let mut graph = self.graph.write();
+      let from_index = *self
+        .indices
+        .entry(from.clone())
+        .or_insert_with(|| graph.add_node(from));
+      let to_index = *self
+        .indices
+        .entry(to.clone())
+        .or_insert_with(|| graph.add_node(to));
+      graph.update_edge(from_index, to_index, ());
+    }
+
+    pub(crate) fn dependencies(&self, key: &QueryKey) -> Option<Vec<QueryKey>> {
+      let index = self.indices.get(key)?;
+      let graph = self.graph.read();
+      let mut deps = graph.neighbors(*index).detach();
+      let mut nodes = vec![];
+      while let Some(node) = deps.next_node(&graph) {
+        nodes.push(graph[node].clone());
+      }
+      Some(nodes)
+    }
+  }
+}
+
 #[derive(PartialEq, Eq, Hash, Clone, Debug)]
-enum QueryKey {
+pub(crate) enum QueryKey {
   ContentOf(Uri),
   CstOf(Uri),
   NewlinesOf(Uri),
   DesugarOf(Uri),
   NameresolveOf(Uri),
   TypesOf(Uri),
+  AstNodeOf(Uri, SyncNode),
+  HoverOf(Uri, SyncNode),
+  NodeStartingAt(Uri, Position),
+  ScopeOf(Uri, Position),
+  CompletionOf(Uri, Position),
+  DefinitionOf(Uri, Position),
+  ShowTreesOf(Uri),
+  IrOf(Uri),
+  SimpleIrOf(Uri),
+  MonomorphOf(Uri),
+  ClosureConvertOf(Uri),
+  WasmOf(Uri),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DesugarOfResult {
+  pub ast: Ast<String>,
+  pub ast_to_cst: HashMap<NodeId, SyncNode>,
+  pub errors: Vec<PellucidError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameresOfResult {
+  pub ast: Ast<Var>,
+  pub names: HashMap<Var, String>,
+  pub errors: Vec<PellucidError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypesOfResult {
+  pub ast: Ast<TypedVar>,
+  pub scheme: TypeScheme,
+  pub errors: Vec<PellucidError>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PellucidDesugarError {
+  pub kind: desugar_base::DesugarError,
+  pub node: SyncNode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PellucidTypeError {
+  pub node: NodeId,
+  pub mark: Mark,
 }
 
 #[derive(Default, Debug)]
@@ -51,12 +149,33 @@ pub struct Database {
   colors: ColorMap,
   // Query caches
   content_input: DashMap<QueryKey, String>,
-  cst_query: DashMap<QueryKey, (Cst, Vec<ParseError>)>,
+  cst_query: DashMap<QueryKey, (Cst, Vec<PellucidError>)>,
   newlines_query: DashMap<QueryKey, Newlines>,
-  desugar_query: DashMap<QueryKey, Result<(Ast<String>, HashMap<NodeId, SyncNode>), PellucidError>>,
-  nameresolve_query: DashMap<QueryKey, Result<Ast<Var>, PellucidError>>,
-  types_query: DashMap<QueryKey, Result<(Ast<TypedVar>, TypeScheme), PellucidError>>,
+  desugar_query: DashMap<QueryKey, DesugarOfResult>,
+  nameresolve_query: DashMap<QueryKey, NameresOfResult>,
+  types_query: DashMap<QueryKey, TypesOfResult>,
+  ast_node_query: DashMap<QueryKey, Option<Ast<TypedVar>>>,
+  hover_query: DashMap<QueryKey, Option<Hover>>,
+  node_starting_at_query: DashMap<QueryKey, Option<SyncNode>>,
+  completion_query: DashMap<QueryKey, Option<CompletionResponse>>,
+  definition_query: DashMap<QueryKey, Option<LspRange>>,
+  scope_query: DashMap<QueryKey, Option<HashMap<String, String>>>,
+  show_trees_query: DashMap<QueryKey, LSPAny>,
+  ir_query: DashMap<QueryKey, Option<LowerOut>>,
+  simple_ir_query: DashMap<QueryKey, Option<lowering_base::IR>>,
+  monomorph_query: DashMap<QueryKey, Option<lowering_base::IR>>,
+  closure_convert_query: DashMap<QueryKey, Option<closure_convert_base::ClosureConvertOutput>>,
+  wasm_query: DashMap<QueryKey, Option<Vec<u8>>>,
   revision: AtomicUsize,
+}
+
+impl Database {
+  pub fn set_input(&self, uri: Uri, content: String) {
+    let key = QueryKey::ContentOf(uri);
+    self.content_input.insert(key.clone(), content);
+    let old_revision = self.revision.fetch_add(1, Ordering::SeqCst);
+    self.colors.mark_red(key, old_revision + 1);
+  }
 }
 
 #[derive(Default, Clone, PartialEq, Eq, Debug)]
@@ -78,7 +197,6 @@ impl Newlines {
       byte += line.len() + 1;
     }
     // Push our final line.
-    //line_offsets.push(byte);
     Self {
       line_offsets,
       len: content.len(),
@@ -89,20 +207,26 @@ impl Newlines {
     if byte > self.len {
       return None;
     }
+    // We shouldn't need to special case this in theory, in practice however...
+    if self.len == 0 {
+      return Some((0, 0));
+    }
     let line = self.line_offsets.partition_point(|&offset| offset <= byte) - 1;
     let start = self.line_offsets[line];
+    let line: u32 = line.try_into().unwrap();
     let col = byte - start;
-    Some((line.try_into().unwrap(), col.try_into().unwrap()))
+    let col: u32 = col.try_into().unwrap();
+    Some((line, col))
   }
 
   fn byte_of(&self, line: u32, character: u32) -> Option<usize> {
     self
       .line_offsets
-      .get(line as usize)
-      .map(|start| start + (character as usize))
+      .get((line) as usize)
+      .map(|start| start + ((character) as usize))
   }
 
-  fn lsp_range_for(&self, range: Range<usize>) -> Option<LspRange> {
+  pub fn lsp_range_for(&self, range: Range<usize>) -> Option<LspRange> {
     let (start_line, start_col) = self.linecol_of(range.start)?;
     let (end_line, end_col) = self.linecol_of(range.end)?;
     Some(LspRange {
@@ -118,20 +242,23 @@ impl Newlines {
   }
 }
 
+pub(crate) struct QueryContext {
+  parent: Option<QueryKey>,
+  db: Arc<Database>,
+  dep_graph: Arc<DepGraph>,
+}
 // Implementation details
-impl Database {
-  fn dependencies(&self, key: &QueryKey) -> Vec<QueryKey> {
-    match key {
-      QueryKey::ContentOf(_) => vec![],
-      QueryKey::CstOf(uri) => vec![QueryKey::ContentOf(uri.clone())],
-      QueryKey::NewlinesOf(uri) => vec![QueryKey::ContentOf(uri.clone())],
-      QueryKey::DesugarOf(uri) => vec![
-        QueryKey::CstOf(uri.clone()),
-        QueryKey::NewlinesOf(uri.clone()),
-      ],
-      QueryKey::NameresolveOf(uri) => vec![QueryKey::DesugarOf(uri.clone())],
-      QueryKey::TypesOf(uri) => vec![QueryKey::NameresolveOf(uri.clone())],
+impl QueryContext {
+  pub(crate) fn with_root(db: Arc<Database>, dep_graph: Arc<DepGraph>) -> Self {
+    Self {
+      parent: None,
+      db,
+      dep_graph,
     }
+  }
+
+  fn dependencies(&self, key: &QueryKey) -> Option<Vec<QueryKey>> {
+    self.dep_graph.dependencies(key)
   }
 
   fn run_query(&self, key: QueryKey) {
@@ -152,30 +279,70 @@ impl Database {
       QueryKey::TypesOf(uri) => {
         let _ = self.types_of(uri);
       }
+      QueryKey::AstNodeOf(uri, node) => {
+        let _ = self.ast_node_of(uri, node);
+      }
+      QueryKey::HoverOf(uri, range) => {
+        let _ = self.hover_of(uri, range);
+      }
+      QueryKey::NodeStartingAt(uri, cursor) => {
+        let _ = self.syntax_node_starting_at(uri, cursor);
+      }
+      QueryKey::CompletionOf(uri, cursor) => {
+        let _ = self.completion_of(uri, cursor);
+      }
+      QueryKey::DefinitionOf(uri, cursor) => {
+        let _ = self.definition_of(uri, cursor);
+      }
+      QueryKey::ScopeOf(uri, cursor) => {
+        let _ = self.scope_at(uri, cursor);
+      }
+      QueryKey::ShowTreesOf(uri) => {
+        let _ = self.show_trees_of(uri);
+      }
+      QueryKey::IrOf(uri) => {
+        let _ = self.ir_of(uri);
+      }
+      QueryKey::SimpleIrOf(uri) => {
+        let _ = self.simple_ir_of(uri);
+      }
+      QueryKey::MonomorphOf(uri) => {
+        let _ = self.monomorph_of(uri);
+      }
+      QueryKey::ClosureConvertOf(uri) => {
+        let _ = self.closure_convert_of(uri);
+      }
+      QueryKey::WasmOf(uri) => {
+        let _ = self.wasm_of(uri);
+      }
     }
   }
 
   fn try_mark_green(&self, key: QueryKey) -> Color {
-    let revision = self.revision.load(Ordering::SeqCst);
-    for dep in self.dependencies(&key) {
-      match self.colors.get(&key) {
+    let revision = self.db.revision.load(Ordering::SeqCst);
+    // If we have no dependencies in the graph, assume we need to run the query.
+    let Some(deps) = self.dependencies(&key) else {
+      return Color::Red;
+    };
+    for dep in deps {
+      match self.db.colors.get(&key) {
         Some((Color::Green, rev)) if revision == rev => continue,
         Some((Color::Red, _)) => return Color::Red,
         _ => {
           if self.try_mark_green(dep.clone()) != Color::Green {
             self.run_query(dep);
             // Because we just ran the query we can be sure the revision is up to date.
-            match self.colors.get(&key) {
+            match self.db.colors.get(&key) {
               Some((Color::Green, _)) => continue,
               Some((Color::Red, _)) => return Color::Red,
-              None => unreachable!(),
+              None => unreachable!("color"),
             }
           }
         }
       }
     }
     // if we marked all dependencies green, mark this node green
-    self.colors.mark_green(key, revision);
+    self.db.colors.mark_green(key, revision);
     Color::Green
   }
 
@@ -185,22 +352,33 @@ impl Database {
     cache: &DashMap<QueryKey, V>,
     producer: impl FnOnce(&Self, &QueryKey) -> V,
   ) -> V {
-    let Some((_, rev)) = self.colors.get(&key) else {
+    let Some((_, rev)) = self.db.colors.get(&key) else {
       // We have not yet run this query, so we must run it.
       let value = producer(self, &key);
       cache.insert(key.clone(), value.clone());
       self
+        .db
         .colors
-        .mark_red(key, self.revision.load(Ordering::SeqCst));
+        .mark_red(key, self.db.revision.load(Ordering::SeqCst));
       return value;
     };
-    let revision = self.revision.load(Ordering::SeqCst);
-    let update_value = |key| {
-      let value = producer(self, &key);
+    let revision = self.db.revision.load(Ordering::SeqCst);
+    let update_value = |key: QueryKey| {
+      if let Some(parent) = &self.parent {
+        self.dep_graph.add_dependency(parent.clone(), key.clone());
+      }
+      let value = producer(
+        &QueryContext {
+          parent: Some(key.clone()),
+          db: self.db.clone(),
+          dep_graph: self.dep_graph.clone(),
+        },
+        &key,
+      );
       let old = cache.insert(key.clone(), value.clone());
       match old {
-        Some(old) if old == value => self.colors.mark_green(key, revision),
-        _ => self.colors.mark_red(key, revision),
+        Some(old) if old == value => self.db.colors.mark_green(key, revision),
+        _ => self.db.colors.mark_red(key, revision),
       };
       value
     };
@@ -216,7 +394,7 @@ impl Database {
         .unwrap_or_else(|| {
           panic!(
             "Green query {:?} missing value in cache\n{:?}",
-            key, self.colors
+            key, self.db.colors
           )
         })
         .value()
@@ -228,50 +406,48 @@ impl Database {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PellucidError {
-  Parser(Vec<ParseError>),
-  Desugar(DesugarError),
+  Parser(ParseError),
+  Desugar(PellucidDesugarError),
   Nameres(NameResolutionError),
-  Types(TypeError),
+  Types(PellucidTypeError),
 }
 
 // Public queries
-impl Database {
-  pub fn set_input(&self, uri: Uri, content: String) {
-    let key = QueryKey::ContentOf(uri);
-    self.content_input.insert(key.clone(), content);
-    let old_revision = self.revision.fetch_add(1, Ordering::SeqCst);
-    self.colors.mark_red(key, old_revision + 1);
-  }
-
+impl QueryContext {
   pub fn content_of(&self, uri: Uri) -> String {
-    self.colors.mark_green(
+    self.db.colors.mark_green(
       QueryKey::ContentOf(uri.clone()),
-      self.revision.load(Ordering::SeqCst),
+      self.db.revision.load(Ordering::SeqCst),
     );
     self
+      .db
       .content_input
       .get(&QueryKey::ContentOf(uri))
       .map(|r| r.value().clone())
       .expect("Uri was queried with unset value")
   }
 
-  pub fn cst_of(&self, uri: Uri) -> (parser_base::Cst, Vec<ParseError>) {
-    self.query(QueryKey::CstOf(uri), &self.cst_query, |this, key| {
+  pub fn cst_of(&self, uri: Uri) -> (parser_base::Cst, Vec<PellucidError>) {
+    self.query(QueryKey::CstOf(uri), &self.db.cst_query, |this, key| {
       let QueryKey::CstOf(uri) = key else {
-        unreachable!()
+        unreachable!("cst")
       };
       let content = this.content_of(uri.clone());
-      parser_base::parse(&content)
+      let (root, errors) = parser_base::parse(&content);
+      (
+        root,
+        errors.into_iter().map(PellucidError::Parser).collect(),
+      )
     })
   }
 
   pub fn newlines_of(&self, uri: Uri) -> Newlines {
     self.query(
       QueryKey::NewlinesOf(uri),
-      &self.newlines_query,
+      &self.db.newlines_query,
       |this, key| {
         let QueryKey::NewlinesOf(uri) = key else {
-          unreachable!()
+          unreachable!("newlines")
         };
         let content = this.content_of(uri.clone());
         Newlines::new(&content)
@@ -279,184 +455,716 @@ impl Database {
     )
   }
 
-  pub fn desugar_of(
-    &self,
-    uri: Uri,
-  ) -> Result<(Ast<String>, HashMap<NodeId, SyncNode>), PellucidError> {
+  pub fn desugar_of(&self, uri: Uri) -> DesugarOfResult {
     self.query(
       QueryKey::DesugarOf(uri),
-      &self.desugar_query,
+      &self.db.desugar_query,
       |this, key| {
         let QueryKey::DesugarOf(uri) = key else {
-          unreachable!()
+          unreachable!("desugar")
         };
-        let (cst, errors) = this.cst_of(uri.clone());
-        if !errors.is_empty() {
-          return Err(PellucidError::Parser(errors));
+        let (cst, mut errors) = this.cst_of(uri.clone());
+        let out = desugar_base::desugar(cst.clone());
+        errors.extend(out.errors.into_iter().map(|(ptr, kind)| {
+          PellucidError::Desugar(PellucidDesugarError {
+            kind,
+            node: SyncNode {
+              root: cst.clone(),
+              ptr,
+            },
+          })
+        }));
+        DesugarOfResult {
+          ast: out.ast,
+          ast_to_cst: out.ast_to_cst,
+          errors,
         }
-        desugar_base::desugar(cst).map_err(PellucidError::Desugar)
       },
     )
   }
 
-  pub fn nameresolve_of(&self, uri: Uri) -> Result<Ast<Var>, PellucidError> {
+  pub fn nameresolve_of(&self, uri: Uri) -> NameresOfResult {
     self.query(
       QueryKey::NameresolveOf(uri),
-      &self.nameresolve_query,
+      &self.db.nameresolve_query,
       |this, key| {
         let QueryKey::NameresolveOf(uri) = key else {
-          unreachable!()
+          unreachable!("nameresolve")
         };
-        let (ast, _) = this.desugar_of(uri.clone())?;
-        name_resolution_base::name_resolution(ast).map_err(PellucidError::Nameres)
+        let desugar = this.desugar_of(uri.clone());
+        let nameres = name_resolution_base::name_resolution(desugar.ast);
+        let mut errors = desugar.errors;
+        errors.extend(nameres.errors.into_iter().map(PellucidError::Nameres));
+        NameresOfResult {
+          ast: nameres.ast,
+          names: nameres.names,
+          errors,
+        }
       },
     )
   }
 
-  pub fn types_of(&self, uri: Uri) -> Result<(Ast<TypedVar>, TypeScheme), PellucidError> {
+  pub fn types_of(&self, uri: Uri) -> TypesOfResult {
     self.query(
       QueryKey::TypesOf(uri.clone()),
-      &self.types_query,
+      &self.db.types_query,
       |this, key| {
         let QueryKey::TypesOf(uri) = key else {
+          unreachable!("types")
+        };
+        let nameres = this.nameresolve_of(uri.clone());
+        let out = types_base::type_infer(nameres.ast);
+        let mut errors = nameres.errors;
+        errors.extend(
+          out
+            .errors
+            .into_iter()
+            .map(|(node, mark)| PellucidError::Types(PellucidTypeError { node, mark })),
+        );
+        TypesOfResult {
+          ast: out.ast,
+          scheme: out.scheme,
+          errors,
+        }
+      },
+    )
+  }
+
+  pub fn ast_node_of(&self, uri: Uri, node: SyncNode) -> Option<Ast<TypedVar>> {
+    self.query(
+      QueryKey::AstNodeOf(uri.clone(), node),
+      &self.db.ast_node_query,
+      |this, key| {
+        let QueryKey::AstNodeOf(uri, node) = key else {
+          unreachable!("ast");
+        };
+        let desugar = this.desugar_of(uri.clone());
+        let id = desugar
+          .ast_to_cst
+          .iter()
+          .find_map(|(id, sync_node)| (sync_node == node).then_some(id))?;
+
+        let types = this.types_of(uri.clone());
+        types.ast.find(*id).cloned()
+      },
+    )
+  }
+
+  pub fn definition_of(&self, uri: Uri, cursor: Position) -> Option<LspRange> {
+    self.query(
+      QueryKey::DefinitionOf(uri.clone(), cursor),
+      &self.db.definition_query,
+      |this, _key| {
+        let syntax = this.syntax_node_starting_at(uri.clone(), cursor)?;
+        let ast_node = this.ast_node_of(uri.clone(), syntax)?;
+        let Ast::Var(node_id, var) = ast_node else {
+          return None;
+        };
+        let ast_to_cst = this.desugar_of(uri.clone()).ast_to_cst;
+        let ast = this.nameresolve_of(uri.clone()).ast;
+        let binder_id = ast
+          .parents_of(node_id)?
+          .into_iter()
+          .find_map(|ast| match ast {
+            Ast::Fun(node_id, bind, _) if bind == &var.0 => Some(node_id),
+            _ => None,
+          })?;
+        let binder_node = ast_to_cst.get(binder_id).or_else(|| {
+          // If our variable is bound by a let and not a function we need the app node to get our
+          // cst node.
+          let parent = ast.parent_of(*binder_id)?;
+          ast_to_cst.get(&parent.id())
+        })?;
+        let root = SyntaxNode::new_root(binder_node.root.clone());
+        let syntax = binder_node.ptr.to_node(&root);
+        let binder = syntax
+          .first_child_by_kind(&|kind| kind == Syntax::FunBinder || kind == Syntax::LetBinder)?;
+        let range_node = binder.first_token()?;
+
+        let newlines = this.newlines_of(uri);
+
+        let range = newlines.lsp_range_for(range_node.text_range().into())?;
+        Some(range)
+      },
+    )
+  }
+
+  pub fn syntax_node_starting_at(&self, uri: Uri, cursor: Position) -> Option<SyncNode> {
+    self.query(
+      QueryKey::NodeStartingAt(uri, cursor),
+      &self.db.node_starting_at_query,
+      |this, key| {
+        let QueryKey::NodeStartingAt(uri, cursor) = key else {
+          unreachable!("starting")
+        };
+        let (green, _) = this.cst_of(uri.clone());
+        let cst = SyntaxNode::<Lang>::new_root(green.clone());
+        let newlines = this.newlines_of(uri.clone());
+        let byte: u32 = newlines
+          .byte_of(cursor.line, cursor.character)?
+          .try_into()
+          .unwrap();
+        let mut token = cst.token_at_offset(TextSize::from(byte));
+        let token = token.next()?;
+        let node = token.parent()?;
+        Some(SyncNode {
+          root: green,
+          ptr: SyntaxNodePtr::new(&node),
+        })
+      },
+    )
+  }
+
+  pub fn hover_of(&self, uri: Uri, node: SyncNode) -> Option<Hover> {
+    self.query(
+      QueryKey::HoverOf(uri, node),
+      &self.db.hover_query,
+      |this, key| {
+        let QueryKey::HoverOf(uri, cst) = key else {
+          unreachable!("hover")
+        };
+        let syntax = SyntaxNode::<Lang>::new_root(cst.root.clone());
+        // We'll need this later to get the correct range for our hover, so we don't want to shadow
+        // it.
+        let cursor_node = cst.ptr.to_node(&syntax);
+
+        // We only want to show a hover if our cursor is over a variable, either in expression or
+        // bound position.
+        let node = match cursor_node.kind() {
+          Syntax::Var => cursor_node.clone(),
+          Syntax::FunBinder => cursor_node.parent()?,
+          Syntax::LetBinder => cursor_node.parent()?,
+          _ => return None,
+        };
+
+        let ast_node = this.ast_node_of(
+          uri.clone(),
+          SyncNode {
+            root: cst.root.clone(),
+            ptr: SyntaxNodePtr::new(&node),
+          },
+        )?;
+        let ty = match &ast_node {
+          Ast::Var(_, typed_var) => &typed_var.1,
+          Ast::Fun(_, typed_var, _) => &typed_var.1,
+          // If we hover over a let binding, our ast node will be App(_, Fun(...), ...).
+          Ast::App(_, fun, _) => match fun.as_ref() {
+            Ast::Fun(_, typed_var, _) => &typed_var.1,
+            _ => return None,
+          },
+          _ => return None,
+        };
+        let newlines = self.newlines_of(uri.clone());
+        let range = newlines.lsp_range_for(cursor_node.text_range().into());
+        Some(Hover {
+          range,
+          contents: HoverContents::Scalar(MarkedString::LanguageString(LanguageString {
+            language: "haskell".to_string(),
+            value: prettyprint_ty(ty),
+          })),
+        })
+      },
+    )
+  }
+
+  pub fn scope_at(&self, uri: Uri, cursor: Position) -> Option<HashMap<String, String>> {
+    self.query(
+      QueryKey::ScopeOf(uri, cursor),
+      &self.db.scope_query,
+      |this, key| {
+        let QueryKey::ScopeOf(uri, cursor) = key else {
           unreachable!()
         };
-        let resolved_ast = this.nameresolve_of(uri.clone())?;
-        types_base::type_infer(resolved_ast).map_err(PellucidError::Types)
+        let desugar = this.desugar_of(uri.clone());
+        let types = this.types_of(uri.clone());
+        fn zip_ast(left: Ast<String>, right: Ast<TypedVar>) -> Ast<(String, TypedVar)> {
+          match (left, right) {
+            (Ast::Var(left_id, a), Ast::Var(right_id, b)) if left_id == right_id => {
+              Ast::Var(left_id, (a, b))
+            }
+            // After desugaring, the only way we introdue a new hole is when we fail to resolve a
+            // name, so we handle that case explicilty here.
+            (Ast::Var(left_id, a), Ast::Hole(right_id, b)) if left_id == right_id => {
+              Ast::Hole(left_id, (a, b))
+            }
+            (Ast::Int(left_id, a), Ast::Int(right_id, _)) if left_id == right_id => {
+              Ast::Int(left_id, a)
+            }
+            (Ast::Fun(left_id, a_var, a_body), Ast::Fun(right_id, b_var, b_body))
+              if left_id == right_id =>
+            {
+              let body = zip_ast(*a_body, *b_body);
+              Ast::fun(left_id, (a_var, b_var), body)
+            }
+            (Ast::App(left_id, a_fun, a_arg), Ast::App(right_id, b_fun, b_arg))
+              if left_id == right_id =>
+            {
+              let fun = zip_ast(*a_fun, *b_fun);
+              let arg = zip_ast(*a_arg, *b_arg);
+              Ast::app(left_id, fun, arg)
+            }
+            (Ast::Hole(left_id, a_hole), Ast::Hole(right_id, b_hole)) if left_id == right_id => {
+              Ast::Hole(left_id, (a_hole, b_hole))
+            }
+            // Outside of our one case with Var, we should not see two different Ast nodes meet or
+            // an Ast node meet a Hole, so we error if that does arise.
+            (left, right) => unreachable!("{left:?} does not zip with {right:?}"),
+          }
+        }
+        let scoped_ast = zip_ast(desugar.ast, types.ast);
+        let (root, _) = this.cst_of(uri.clone());
+        let cst = SyntaxNode::<Lang>::new_root(root.clone());
+        let newlines = this.newlines_of(uri.clone());
+
+        let offset: u32 = newlines
+          .byte_of(cursor.line, cursor.character)?
+          .try_into()
+          .unwrap();
+        let token = cst.token_at_offset(offset.into()).left_biased()?;
+        let node = token.parent()?;
+        let ast_node = this.ast_node_of(
+          uri.clone(),
+          SyncNode {
+            root,
+            ptr: SyntaxNodePtr::new(&node),
+          },
+        )?;
+        // TODO: Write this method.
+        let Some(parents) = scoped_ast.parents_of(ast_node.id()) else {
+          return Some(HashMap::default());
+        };
+
+        // We reverse our iterator so that earlier entries in our parent list will overwrite later
+        // entries, mirroring our scoping rules.
+        let scope: HashMap<String, String> = parents
+          .into_iter()
+          .rev()
+          .filter_map(|ast| match ast {
+            Ast::Fun(_, (name, typed_var), _) => Some((name.clone(), prettyprint_ty(&typed_var.1))),
+            _ => None,
+          })
+          .collect();
+        Some(scope)
+      },
+    )
+  }
+
+  // Is it worth having a query for this?
+  pub fn completion_of(&self, uri: Uri, cursor: Position) -> Option<CompletionResponse> {
+    self.query(
+      QueryKey::CompletionOf(uri, cursor),
+      &self.db.completion_query,
+      |this, key| {
+        let QueryKey::CompletionOf(uri, cursor) = key else {
+          unreachable!();
+        };
+        let scope = this
+          .scope_at(uri.clone(), *cursor)?
+          .into_iter()
+          .collect::<Vec<_>>();
+
+        // TODO: We should add keywords here.
+        Some(CompletionResponse::Array(
+          scope
+            .into_iter()
+            .map(|(name, pretty_ty)| CompletionItem {
+              label: name,
+              kind: Some(CompletionItemKind::VARIABLE),
+              detail: Some(pretty_ty),
+              ..Default::default()
+            })
+            .collect(),
+        ))
       },
     )
   }
 
   pub fn diagnostics(&self, uri: Uri) -> Vec<Diagnostic> {
     // TODO: We should produce multiple diagnostics here.
-    match self.types_of(uri.clone()) {
-      Ok(_) => {
-        vec![]
-      }
-      Err(err) => {
-        let newlines = self.newlines_of(uri.clone());
+    let types = self.types_of(uri.clone());
+    if types.errors.is_empty() {
+      return vec![];
+    }
+    let newlines = self.newlines_of(uri.clone());
+    types
+      .errors
+      .into_iter()
+      .map(|err| match err {
+        PellucidError::Parser(err) => Diagnostic::new_simple(
+          newlines
+            .lsp_range_for(err.span)
+            .expect("error span outside range"),
+          format!("parse: Expected one of {:?}", err.expected),
+        ),
+        PellucidError::Desugar(desugar) => Diagnostic::new_simple(
+          newlines
+            .lsp_range_for(desugar.node.ptr.text_range().into())
+            .expect("error span outside range"),
+          match desugar.kind {
+            DesugarError::MissingSyntax(node) => format!("Expected node {node:?}"),
+            DesugarError::LetMissingBinding => "Let missing a variable".to_string(),
+            DesugarError::LetMissingExpr => "Let missing a rhs expr".to_string(),
+            DesugarError::InvalidInt(_) => "Expected an integer".to_string(),
+            DesugarError::FunMissingExpr => "Function missing a body".to_string(),
+            DesugarError::VarMissingIdentifier => {
+              "Expected variable to contain an identifier token".to_string()
+            }
+            DesugarError::IntegerExprMissingInt => {
+              "Expected integer expr to contain an int token".to_string()
+            }
+            DesugarError::ApplicationMissingFun => "Application is missing a function".to_string(),
+            DesugarError::ApplicationMissingArg => "Applicaiton is missing a argument".to_string(),
+            DesugarError::ExprMissingBody => {
+              "Expected expression to have a body after let bindings.".to_string()
+            }
+            DesugarError::UnexpectedAtom(kind) => {
+              format!("Expecting an atom but found syntax {kind:?}.")
+            }
+            DesugarError::UnexpectedInExpr(syntax) => {
+              format!("Expression contained unexpected syntax \"{syntax}\"")
+            }
+          },
+        ),
+        PellucidError::Nameres(nameres) => {
+          let desugar = self.desugar_of(uri.clone());
+          let (node_id, var) = match nameres {
+            NameResolutionError::UndefinedVar(node_id, var) => (node_id, var),
+          };
+          Diagnostic::new_simple(
+            newlines
+              .lsp_range_for(desugar.ast_to_cst[&node_id].ptr.text_range().into())
+              .expect("error span outside range"),
+            format!("namres: Undefined variable {var}"),
+          )
+        }
+        PellucidError::Types(types) => {
+          let desugar = self.desugar_of(uri.clone());
+          let range = newlines
+            .lsp_range_for(desugar.ast_to_cst[&types.node].ptr.text_range().into())
+            .expect("error span outside range");
 
-        match err {
-          PellucidError::Parser(vec) => vec
-            .into_iter()
-            .map(|err| {
-              Diagnostic::new_simple(
-                newlines
-                  .lsp_range_for(err.span)
-                  .expect("error span outside range"),
-                format!("Expected one of {:?}", err.expected),
-              )
-            })
-            .collect(),
-          PellucidError::Desugar(desugar) => {
-            vec![Diagnostic::new_simple(
-              newlines
-                .lsp_range_for(desugar.span)
-                .expect("error span outside range"),
-              match desugar.kind {
-                ErrorKind::MissingSyntax(node) => format!("Expected node {:?}", node),
-                ErrorKind::ProgramMissingExpr => "Program missing expression node".to_string(),
-                ErrorKind::ExpectedLetOrAppInExpr(syntax) => {
-                  format!("Expected let or app node, but encountered {:?}", syntax)
-                }
-                ErrorKind::LetMissingBinding => "Let missing a variable".to_string(),
-                ErrorKind::LetMissingExpr => "Let missing a rhs expr".to_string(),
-                ErrorKind::Unexpected(vec) => format!("Unexpected {:?}", vec), //TODO: Format this
-                //better
-                ErrorKind::InvalidInt(_) => "Expected an integer".to_string(),
-                ErrorKind::FunMissingIdentifier => "Function missing a variable".to_string(),
-                ErrorKind::FunMissingExpr => "Function missing a body".to_string(),
-                ErrorKind::EmptyApplication => "Expected application but it was empty".to_string(),
-                ErrorKind::VarMissingIdentifier => {
-                  "Expected variable to contain an identifier token".to_string()
-                }
-                ErrorKind::IntegerExprMissingInt => {
-                  "Expected integer expr to contain an int token".to_string()
-                }
-              },
-            )]
-          }
-          PellucidError::Nameres(nameres) => {
-            let (_, ast_to_cst) = self
-              .desugar_of(uri)
-              .expect("We can be sure this is Ok(_) otherwise we'd hit DesugarError case above");
-
-            let (node_id, var) = match nameres {
-              NameResolutionError::UndefinedVar(node_id, var) => (node_id, var),
-            };
-            vec![Diagnostic::new_simple(
-              newlines
-                .lsp_range_for(ast_to_cst[&node_id].span.into())
-                .expect("error span outside range"),
-              format!("Undefined variable {}", var),
-            )]
-          }
-          PellucidError::Types(types) => {
-            let (ast, ast_to_cst) = self
-              .desugar_of(uri.clone())
-              .expect("We can be sure this is Ok(_) otherwise we'd hit DesugarError case above");
-            web_sys::console::log_1(&JsValue::from_str(&format!("{:?}", self.colors)));
-            vec![match types.kind {
-              TypeErrorKind::TypeNotEqual(left, right) => {
-                let ast_node = ast
-                  .find(types.node_id)
-                  .expect("Node id is missing an AST node");
-                match ast_node {
-                  Ast::Var(_, _) => {}
-                  Ast::Int(_, _) => {}
-                  Ast::Fun(_, _, _) => {}
-                  Ast::App(id, fun, arg) => {
-                    // Our function is applied to too many arguments.
-                    if let (Type::Fun(_, _), arg_ty) = (&left, &right) {
-                      // Our app node maps back to our overarching CST app node.
-                      // But we have enough information to narrow the span of our diagnostic, so we
-                      // construct our span manually.
-                      let left_cst = &ast_to_cst[&fun.id()];
-                      let right_cst = &ast_to_cst[&arg.id()];
-                      return vec![Diagnostic::new_simple(
-                        newlines
-                          .lsp_range_for(left_cst.span.cover(right_cst.span).into())
-                          .expect("error span outside range"),
-                        format!(
-                          "Expected this to be a function but it has type {}",
-                          prettyprint_ty(arg_ty)
-                        ),
-                      )];
-                    }
-
-                    // Otherwise, assume the error is an invalid argument type.
-                    let Some(Ast::App(_, _, parent_arg)) = ast.parent_of(*id) else {
-                      todo!("Proper error handling");
-                    };
-                    return vec![Diagnostic::new_simple(
-                      newlines
-                        .lsp_range_for(ast_to_cst[&parent_arg.id()].span.into())
-                        .expect("error span outside range"),
-                      format!("Expected argument of type {} but got {}", prettyprint_ty(&left), prettyprint_ty(&right)),
-                    )];
-                  }
-                };
-                Diagnostic::new_simple(
-                  newlines
-                    .lsp_range_for(ast_to_cst[&types.node_id].span.into())
-                    .expect("error span outside range"),
-                  format!("Types are not equal: {} != {}", prettyprint_ty(&left), prettyprint_ty(&right)),
-                )
-              }
-              TypeErrorKind::InfiniteType(type_var, ty) => Diagnostic::new_simple(
-                newlines
-                  .lsp_range_for(ast_to_cst[&types.node_id].span.into())
-                  .expect("error span outside range"),
-                format!(
-                  "Tried to solve variable {:?} to infinite type {:?}",
-                  type_var, ty
-                ),
+          Diagnostic::new_simple(
+            range,
+            match types.mark {
+              Mark::InfiniteType { type_var, ty } => format!(
+                "types: Tried to solve variable {} to infinite type {}",
+                prettyprint_ty(&Type::Var(type_var)),
+                prettyprint_ty(&ty)
               ),
-            }]
+              Mark::UnexpectedFun {
+                expected_ty,
+                fun_ty,
+              } => format!(
+                "types: Expected a value of type {}, but found function of type {}",
+                prettyprint_ty(&expected_ty),
+                prettyprint_ty(&fun_ty)
+              ),
+              Mark::AppExpectedFun {
+                inferred_ty,
+                expected_fun_ty,
+              } => format!(
+                "types: Expected this to be a function {} but it has type {}",
+                prettyprint_ty(&expected_fun_ty),
+                prettyprint_ty(&inferred_ty)
+              ),
+              Mark::Subsumption { checked, inferred } => format!(
+                "types: Tried to check this as type {} but it's inferred to have type {}",
+                prettyprint_ty(&checked),
+                prettyprint_ty(&inferred)
+              ),
+            },
+          )
+        }
+      })
+      .collect()
+  }
+
+  pub fn show_trees_of(&self, uri: Uri) -> LSPAny {
+    self.query(
+      QueryKey::ShowTreesOf(uri.clone()),
+      &self.db.show_trees_query,
+      |this, _| {
+        let (green, _) = this.cst_of(uri.clone());
+        let desugar = this.desugar_of(uri.clone());
+        let types = this.types_of(uri.clone());
+
+        let root = SyntaxNode::<Lang>::new_root(green);
+
+        fn cst_to_json(nort: NodeOrToken<SyntaxNode<Lang>, SyntaxToken<Lang>>) -> LSPAny {
+          let kind: u64 = nort.kind() as u64;
+          let text_range: std::ops::Range<usize> = nort.text_range().into();
+          json!({
+            "key": kind,
+            "text_range": {
+              "start": text_range.start,
+              "end": text_range.end
+            },
+            "children": if let NodeOrToken::Node(node) = nort {
+              Some(node.children_with_tokens().map(cst_to_json).collect::<Vec<_>>())
+            } else {
+              None
+            }
+          })
+        }
+
+        fn zip_ast(left: Ast<String>, right: Ast<TypedVar>) -> Ast<(String, TypedVar)> {
+          match (left, right) {
+            (Ast::Var(left_id, a), Ast::Var(right_id, b)) if left_id == right_id => {
+              Ast::Var(left_id, (a, b))
+            }
+            // After desugaring, the only way we introdue a new hole is when we fail to resolve a
+            // name, so we handle that case explicilty here.
+            (Ast::Var(left_id, a), Ast::Hole(right_id, b)) if left_id == right_id => {
+              Ast::Hole(left_id, (a, b))
+            }
+            (Ast::Int(left_id, a), Ast::Int(right_id, _)) if left_id == right_id => {
+              Ast::Int(left_id, a)
+            }
+            (Ast::Fun(left_id, a_var, a_body), Ast::Fun(right_id, b_var, b_body))
+              if left_id == right_id =>
+            {
+              let body = zip_ast(*a_body, *b_body);
+              Ast::fun(left_id, (a_var, b_var), body)
+            }
+            (Ast::App(left_id, a_fun, a_arg), Ast::App(right_id, b_fun, b_arg))
+              if left_id == right_id =>
+            {
+              let fun = zip_ast(*a_fun, *b_fun);
+              let arg = zip_ast(*a_arg, *b_arg);
+              Ast::app(left_id, fun, arg)
+            }
+            (Ast::Hole(left_id, a_hole), Ast::Hole(right_id, b_hole)) if left_id == right_id => {
+              Ast::Hole(left_id, (a_hole, b_hole))
+            }
+            // Outside of our one case with Var, we should not see two different Ast nodes meet or
+            // an Ast node meet a Hole, so we error if that does arise.
+            (left, right) => unreachable!("{left:?} does not zip with {right:?}"),
           }
         }
+
+        fn ast_to_json(printer: &mut PrettyprintType, ast: Ast<(String, TypedVar)>) -> LSPAny {
+          match ast {
+            Ast::Var(_, (name, ty)) => json!({
+              "kind": "var",
+              "name": name,
+              "type": printer.prettyprint(&ty.1),
+            }),
+            Ast::Int(_, i) => json!({
+              "kind": "int",
+              "vallue": i
+            }),
+            Ast::Fun(_, (name, ty), body) => json!({
+              "kind": "fun",
+              "name": name,
+              "type": printer.prettyprint(&ty.1),
+              "body": ast_to_json(printer, *body)
+            }),
+            Ast::App(_, fun, arg) => json!({
+              "kind": "app",
+              "fun": ast_to_json(printer, *fun),
+              "arg": ast_to_json(printer, *arg),
+            }),
+            Ast::Hole(_, (_, ty)) => json!({
+              "kind": "hole",
+              "type": printer.prettyprint(&ty.1)
+            }),
+          }
+        }
+
+        let ast = zip_ast(desugar.ast, types.ast);
+        let mut printer = PrettyprintType::new();
+        let ast_json = ast_to_json(&mut printer, ast);
+
+        let cst_json = cst_to_json(NodeOrToken::Node(root));
+
+        fn ir_to_json(
+          printer: &mut PrettyprintType,
+          names: &HashMap<lowering_base::VarId, String>,
+          ir: lowering_base::IR,
+        ) -> LSPAny {
+          let var_name = |var_id| {
+            if let Some(name) = names.get(var_id) {
+              name.clone()
+            } else {
+              format!("{var_id}")
+            }
+          };
+          match ir {
+            IR::Var(var) => json!({
+              "kind": "var",
+              "name": var_name(&var.id),
+              "type": printer.prettyprint_ir(&var.ty),
+            }),
+            IR::Int(i) => json!({
+              "kind": "int",
+              "value": i,
+            }),
+            IR::Fun(var, ir) => json!({
+              "kind": "fun",
+              "name": var_name(&var.id),
+              "type": printer.prettyprint_ir(&var.ty),
+              "body": ir_to_json(printer, names, *ir),
+            }),
+            IR::App(fun, arg) => json!({
+              "kind": "app",
+              "fun": ir_to_json(printer, names, *fun),
+              "arg": ir_to_json(printer, names, *arg),
+            }),
+            IR::TyFun(kind, ir) => json!({
+              "kind": "ty_fun",
+              "ty_fun_kind": format!("{:?}", kind),
+              "body": ir_to_json(printer, names, *ir)
+            }),
+            IR::TyApp(ir, ty) => json!({
+              "kind": "ty_app",
+              "ty_fun": ir_to_json(printer, names, *ir),
+              "type": printer.prettyprint_ir(&ty),
+            }),
+            IR::Local(var, defn, body) => json!({
+              "kind": "local",
+              "name": var_name(&var.id),
+              "type": printer.prettyprint_ir(&var.ty),
+              "defn": ir_to_json(printer, names, *defn),
+              "body": ir_to_json(printer, names, *body),
+            }),
+          }
+        }
+
+        let names = this.nameresolve_of(uri.clone()).names;
+        let ir_vars = this
+          .ir_of(uri.clone())
+          .map(|ir| ir.vars)
+          .unwrap_or_default();
+        let mut ir_names = HashMap::default();
+        for (ast_var, ir_var) in ir_vars {
+          if let Some(name) = names.get(&ast_var) {
+            ir_names.insert(ir_var, name.clone());
+          }
+        }
+        let ir = this
+          .ir_of(uri.clone())
+          .map(|lower| ir_to_json(&mut printer, &ir_names, lower.ir));
+        let simple_ir = this
+          .simple_ir_of(uri.clone())
+          .map(|ir| ir_to_json(&mut printer, &ir_names, ir));
+        let wasm: Option<String> = this.wasm_of(uri.clone()).map(|wasm| {
+          let mut out = PrintHtmlWrite::default();
+          wasmprinter::Config::new()
+            .fold_instructions(true)
+            .indent_text("  ")
+            .print(&wasm, &mut out)
+            .expect("Failed to print wat from wasm");
+          out.into()
+        });
+
+        json!({
+          "cst": cst_json,
+          "ast": ast_json,
+          "ir": ir,
+          "simple_ir": simple_ir,
+          "wasm": wasm,
+        })
+      },
+    )
+  }
+
+  pub fn ir_of(&self, uri: Uri) -> Option<LowerOut> {
+    self.query(QueryKey::IrOf(uri), &self.db.ir_query, |this, key| {
+      let QueryKey::IrOf(uri) = key else {
+        unreachable!()
+      };
+      let types = this.types_of(uri.clone());
+      // If we have errors, lowering will crash
+      if !types.errors.is_empty() {
+        return None;
       }
-    }
+
+      let lower = lowering_base::lower(types.ast, types.scheme);
+
+      Some(lower)
+    })
+  }
+
+  pub fn simple_ir_of(&self, uri: Uri) -> Option<lowering_base::IR> {
+    self.query(
+      QueryKey::SimpleIrOf(uri),
+      &self.db.simple_ir_query,
+      |this, key| {
+        let QueryKey::SimpleIrOf(uri) = key else {
+          unreachable!()
+        };
+        let lower = this.ir_of(uri.clone())?;
+        let simple_ir = simplify_base::simplify(lower.ir);
+
+        Some(simple_ir)
+      },
+    )
+  }
+
+  pub fn monomorph_of(&self, uri: Uri) -> Option<lowering_base::IR> {
+    self.query(
+      QueryKey::MonomorphOf(uri.clone()),
+      &self.db.monomorph_query,
+      |this, _| {
+        let ir = this.simple_ir_of(uri)?;
+        Some(monomorph_base::trivial_monomorph(ir))
+      },
+    )
+  }
+
+  pub fn closure_convert_of(&self, uri: Uri) -> Option<closure_convert_base::ClosureConvertOutput> {
+    self.query(
+      QueryKey::ClosureConvertOf(uri.clone()),
+      &self.db.closure_convert_query,
+      |this, _| {
+        let ir = this.monomorph_of(uri)?;
+        Some(closure_convert_base::closure_convert(ir))
+      },
+    )
+  }
+
+  pub fn wasm_of(&self, uri: Uri) -> Option<Vec<u8>> {
+    self.query(
+      QueryKey::WasmOf(uri.clone()),
+      &self.db.wasm_query,
+      |this, _| {
+        let nameres = this.nameresolve_of(uri.clone());
+        let lower = this.ir_of(uri.clone())?;
+        let closures = this.closure_convert_of(uri)?;
+
+        let mut names: HashMap<closure_convert_base::VarId, String> = nameres
+          .names
+          .into_iter()
+          .filter_map(|(ast_var, name)| {
+            let ir_var = lower.vars.get(&ast_var)?;
+            let closure_var = closures.vars.get(ir_var)?;
+            Some((*closure_var, name))
+          })
+          .collect();
+
+        let main_defn = ItemId(
+          closures
+            .closure_items
+            .last_key_value()
+            .map(|(key, _)| key.0 + 1)
+            .unwrap_or(0),
+        );
+        let mut defns = closures.closure_items;
+        let mut main_item = closures.item;
+        // Just flagrantly cheating because we don't have real support for top level items.
+        let main_var = closure_convert_base::VarId(usize::MAX);
+        main_item.name = Some(closure_convert_base::Var {
+          id: main_var,
+          // This doesn't matter so we just make something up.
+          ty: closure_convert_base::Type::Int,
+        });
+        names.insert(main_var, "main".to_string());
+        defns.insert(main_defn, main_item);
+
+        let module = emit_base::emit_wasm(defns.into_iter().collect(), names);
+        Some(module)
+      },
+    )
   }
 }
 
@@ -466,8 +1174,9 @@ trait Find {
 impl<T> Find for Ast<T> {
   fn find(&self, id: NodeId) -> Option<&Ast<T>> {
     match self {
-      Ast::Var(node_id, _) => (node_id == &id).then_some(self),
-      Ast::Int(node_id, _) => (node_id == &id).then_some(self),
+      Ast::Var(node_id, _) | Ast::Hole(node_id, _) | Ast::Int(node_id, _) => {
+        (node_id == &id).then_some(self)
+      }
       Ast::Fun(node_id, _, body) => {
         if node_id == &id {
           return Some(self);
@@ -498,16 +1207,30 @@ mod prettyprint {
     out
   }
 
-  struct PrettyprintType {
+  pub struct PrettyprintType {
     ty_var_names: Box<dyn Iterator<Item = String>>,
     ty_vars: HashMap<TypeVar, String>,
   }
   impl PrettyprintType {
-    fn new() -> Self {
-        Self {
-            ty_var_names: Box::new(('\u{03C1}'..='\u{03D9}').map(|c| c.to_string())),
-            ty_vars: HashMap::default(),
-        }
+    pub fn new() -> Self {
+      Self {
+        ty_var_names: Box::new(('\u{03B1}'..='\u{03D9}').map(|c| c.to_string())),
+        ty_vars: HashMap::default(),
+      }
+    }
+
+    pub fn prettyprint(&mut self, ty: &Type) -> String {
+      let doc = self.pretty(ty, &RcAllocator);
+      let mut out = String::new();
+      doc.render_fmt(80, &mut out).unwrap();
+      out
+    }
+
+    pub fn prettyprint_ir(&mut self, ty: &lowering_base::Type) -> String {
+      let doc = self.pretty_ir(ty, &RcAllocator);
+      let mut out = String::new();
+      doc.render_fmt(80, &mut out).unwrap();
+      out
     }
 
     fn pretty_var<'a>(
@@ -528,6 +1251,7 @@ mod prettyprint {
           .clone(),
       )
     }
+
     fn pretty<'a>(&mut self, ty: &Type, a: &'a RcAllocator) -> DocBuilder<'a, RcAllocator> {
       fn requires_parens(ty: &Type) -> bool {
         matches!(ty, Type::Fun(_, _))
@@ -549,5 +1273,133 @@ mod prettyprint {
         }
       }
     }
+
+    fn pretty_ir<'a>(
+      &mut self,
+      ty: &lowering_base::Type,
+      a: &'a RcAllocator,
+    ) -> DocBuilder<'a, RcAllocator> {
+      use lowering_base::{Kind, Type};
+      match ty {
+        Type::Int => a.text("Int"),
+        Type::Var(type_var) => a.as_string(type_var),
+        Type::Fun(arg_ty, ret_ty) => {
+          let mut arg = self.pretty_ir(arg_ty, a);
+          let ret = self.pretty_ir(ret_ty, a);
+          if matches!(&**arg_ty, Type::Fun(_, _) | Type::TyFun(_, _)) {
+            arg = arg.parens();
+          }
+          arg
+            .append(a.space().clone())
+            .append("->")
+            .append(a.space().clone())
+            .append(ret)
+        }
+        Type::TyFun(kind, ty) => {
+          let kind_doc = match kind {
+            Kind::Type => a.text("Type"),
+          };
+          kind_doc
+            .append(a.space())
+            .append(".")
+            .append(a.space())
+            .append(self.pretty_ir(ty, a))
+        }
+      }
+    }
+  }
+}
+
+#[derive(Default)]
+struct PrintHtmlWrite(String);
+impl From<PrintHtmlWrite> for String {
+  fn from(val: PrintHtmlWrite) -> Self {
+    val.0
+  }
+}
+impl wasmprinter::Print for PrintHtmlWrite {
+  fn write_str(&mut self, s: &str) -> std::io::Result<()> {
+    self.0.push_str(s);
+    Ok(())
+  }
+
+  fn start_literal(&mut self) -> std::io::Result<()> {
+    self.0.push_str("<span class=\"number\">");
+    Ok(())
+  }
+
+  fn start_name(&mut self) -> std::io::Result<()> {
+    self.0.push_str("<span class=\"variable\">");
+    Ok(())
+  }
+
+  fn start_keyword(&mut self) -> std::io::Result<()> {
+    self.0.push_str("<span class=\"keyword\">");
+    Ok(())
+  }
+
+  fn start_type(&mut self) -> std::io::Result<()> {
+    self.0.push_str("<span class=\"type\">");
+    Ok(())
+  }
+
+  fn start_comment(&mut self) -> std::io::Result<()> {
+    self.0.push_str("<span class=\"comment\">");
+    Ok(())
+  }
+
+  fn reset_color(&mut self) -> std::io::Result<()> {
+    self.0.push_str("</span>");
+    Ok(())
+  }
+
+  fn supports_async_color(&self) -> bool {
+    false
+  }
+
+  fn newline(&mut self) -> std::io::Result<()> {
+    self.write_str("\n")
+  }
+
+  fn start_line(&mut self, binary_offset: Option<usize>) {
+    let _ = binary_offset;
+  }
+
+  fn write_fmt(&mut self, args: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+    struct Adapter<'a, T: ?Sized + 'a> {
+      inner: &'a mut T,
+      error: std::io::Result<()>,
+    }
+
+    impl<T: wasmprinter::Print + ?Sized> std::fmt::Write for Adapter<'_, T> {
+      fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        match self.inner.write_str(s) {
+          Ok(()) => Ok(()),
+          Err(e) => {
+            self.error = Err(e);
+            Err(std::fmt::Error)
+          }
+        }
+      }
+    }
+
+    let mut output = Adapter {
+      inner: self,
+      error: Ok(()),
+    };
+    match std::fmt::write(&mut output, args) {
+      Ok(()) => Ok(()),
+      Err(..) => output.error,
+    }
+  }
+
+  fn print_custom_section(
+    &mut self,
+    name: &str,
+    binary_offset: usize,
+    data: &[u8],
+  ) -> std::io::Result<bool> {
+    let _ = (name, binary_offset, data);
+    Ok(false)
   }
 }

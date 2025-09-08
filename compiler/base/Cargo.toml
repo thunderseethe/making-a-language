@@ -23,6 +23,12 @@ tower-lsp-server = { version = "0.22", default-features = false, features = ["ru
 wasm-bindgen-futures = "0.4.50"
 wasm-streams = "0.4.2"
 web-sys = { version = "0.3.77", features = ["console"] }
-dashmap = "6.1.0"
+dashmap = "7.0.0-rc2"
+parking_lot.workspace = true
+petgraph = "0.8.2"
+serde_json = "1.0.142"
 pretty.workspace = true
+wasmprinter.workspace = true
+wasmparser.workspace = true
+wast.workspace = true
 

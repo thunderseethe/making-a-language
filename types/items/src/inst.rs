@@ -34,11 +34,14 @@ impl<'a> Instantiate<'a> {
 
   fn evidence(&self, ev: Evidence) -> Constraint {
     match ev {
-      Evidence::RowEquation { left, right, goal } => Constraint::RowCombine(self.id, RowCombination {
-        left: self.row(left),
-        right: self.row(right),
-        goal: self.row(goal),
-      }),
+      Evidence::RowEquation { left, right, goal } => Constraint::RowCombine(
+        self.id,
+        RowCombination {
+          left: self.row(left),
+          right: self.row(right),
+          goal: self.row(goal),
+        },
+      ),
     }
   }
 
@@ -53,10 +56,7 @@ impl<'a> Instantiate<'a> {
         .copied()
         .map(Row::Unifier)
         .unwrap_or_else(|| {
-          panic!(
-            "Expected row var {:?} to be mapped to fresh unifier in instantiation",
-            var
-          )
+          panic!("Expected row var {var:?} to be mapped to fresh unifier in instantiation",)
         }),
       Row::Closed(mut row) => {
         row.values = row.values.into_iter().map(|ty| self.ty(ty)).collect();
@@ -73,10 +73,7 @@ impl<'a> Instantiate<'a> {
         .copied()
         .map(Type::Unifier)
         .unwrap_or_else(|| {
-          panic!(
-            "Expected type var {:?} to be mapped to fresh unifier in instantiation",
-            var
-          )
+          panic!("Expected type var {var:?} to be mapped to fresh unifier in instantiation",)
         }),
       ty @ Type::Int | ty @ Type::Unifier(_) => ty,
       Type::Fun(arg, ret) => {

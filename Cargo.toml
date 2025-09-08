@@ -42,9 +42,13 @@ compiler-base = { path = "compiler/base" }
 ena = "0.14.2"
 expect-test = "1.5.1"
 im = "15.1"
+parking_lot = { version = "0.12" }
 pretty_assertions = "1.4"
 pretty = "0.12.3"
 wasmtime = "34" 
+wasmprinter = "0.238"
+wasmparser = { version = "0.238", features = ["validate", "features"] }
+wast = "238"
 
 [dependencies]
 parser-base.workspace = true

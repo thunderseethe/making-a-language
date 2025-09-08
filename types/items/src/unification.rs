@@ -8,9 +8,9 @@ pub enum TypeErrorKind {
   InfiniteType(TypeUniVar, Type),
   RowsNotEqual((Row, Row)),
   CheckIntroducedExtraVariablesOrConstraints {
-      extra_types: Vec<TypeVar>,
-      extra_row: Vec<RowVar>,
-      extra_evidence: Vec<Evidence>,
+    extra_types: Vec<TypeVar>,
+    extra_row: Vec<RowVar>,
+    extra_evidence: Vec<Evidence>,
   },
 }
 
@@ -31,8 +31,12 @@ impl TypeInference {
   pub(crate) fn unification(&mut self, constraints: Vec<Constraint>) -> Result<(), TypeError> {
     for constr in constraints {
       match constr {
-        Constraint::TypeEqual(node_id, left, right) => self.unify_ty_ty(left, right).map_err(|kind| TypeError { kind, node_id })?,
-        Constraint::RowCombine(node_id, row_comb) => self.unify_row_comb(row_comb).map_err(|kind| TypeError { kind, node_id })?,
+        Constraint::TypeEqual(node_id, left, right) => self
+          .unify_ty_ty(left, right)
+          .map_err(|kind| TypeError { kind, node_id })?,
+        Constraint::RowCombine(node_id, row_comb) => self
+          .unify_row_comb(row_comb)
+          .map_err(|kind| TypeError { kind, node_id })?,
       }
     }
     Ok(())
@@ -165,7 +169,11 @@ impl TypeInference {
 
   /// Calculate the set difference of the goal row and the sub row, returning it as a new row.
   /// Unify the subset of the goal row that matches the sub row
-  fn diff_and_unify(&mut self, goal: ClosedRow, sub: ClosedRow) -> Result<ClosedRow, TypeErrorKind> {
+  fn diff_and_unify(
+    &mut self,
+    goal: ClosedRow,
+    sub: ClosedRow,
+  ) -> Result<ClosedRow, TypeErrorKind> {
     let mut diff_fields = vec![];
     let mut diff_values = vec![];
     for (field, value) in goal.fields.into_iter().zip(goal.values.into_iter()) {
@@ -189,9 +197,14 @@ impl TypeInference {
     let left = self.normalize_row(left);
     let right = self.normalize_row(right);
     match (left, right) {
-      (Row::Open(left), Row::Open(right)) => (left == right)
-        .then_some(())
-        .ok_or(TypeErrorKind::RowsNotEqual((Row::Open(left), Row::Open(right)))),
+      (Row::Open(left), Row::Open(right)) => {
+        (left == right)
+          .then_some(())
+          .ok_or(TypeErrorKind::RowsNotEqual((
+            Row::Open(left),
+            Row::Open(right),
+          )))
+      }
       (Row::Unifier(left), Row::Unifier(right)) => self
         .row_unification_table
         .unify_var_var(left, right)
@@ -220,9 +233,9 @@ impl TypeInference {
         }
         Ok(())
       }
-      (Row::Open(var), Row::Closed(row)) | (Row::Closed(row), Row::Open(var)) => {
-        Err(TypeErrorKind::RowsNotEqual((Row::Open(var), Row::Closed(row))))
-      }
+      (Row::Open(var), Row::Closed(row)) | (Row::Closed(row), Row::Open(var)) => Err(
+        TypeErrorKind::RowsNotEqual((Row::Open(var), Row::Closed(row))),
+      ),
     }
   }
 
@@ -247,25 +260,28 @@ impl TypeInference {
         let new_comb = RowCombination { left, right, goal };
         // Check if we've already seen an combination that we can unify against
         let mut poss_uni = None;
-        self.partial_row_combs = std::mem::take(&mut self.partial_row_combs).into_iter().map(|comb| {
-          let comb = RowCombination {
-            left: self.normalize_row(comb.left),
-            right: self.normalize_row(comb.right),
-            goal: self.normalize_row(comb.goal),
-          };
-          if comb.is_unifiable(&new_comb) {
-            poss_uni = Some(comb.clone());
-          //Row combinations commute so we have to check for that possible unification
-          } else if comb.is_comm_unifiable(&new_comb) {
-            // We commute our combination so we unify the correct rows later
-            poss_uni = Some(RowCombination {
-              left: comb.right.clone(),
-              right: comb.left.clone(),
-              goal: comb.goal.clone(),
-            });
-          }
-          comb
-        }).collect();
+        self.partial_row_combs = std::mem::take(&mut self.partial_row_combs)
+          .into_iter()
+          .map(|comb| {
+            let comb = RowCombination {
+              left: self.normalize_row(comb.left),
+              right: self.normalize_row(comb.right),
+              goal: self.normalize_row(comb.goal),
+            };
+            if comb.is_unifiable(&new_comb) {
+              poss_uni = Some(comb.clone());
+            //Row combinations commute so we have to check for that possible unification
+            } else if comb.is_comm_unifiable(&new_comb) {
+              // We commute our combination so we unify the correct rows later
+              poss_uni = Some(RowCombination {
+                left: comb.right.clone(),
+                right: comb.left.clone(),
+                goal: comb.goal.clone(),
+              });
+            }
+            comb
+          })
+          .collect();
 
         match poss_uni {
           // Unify if we have a match

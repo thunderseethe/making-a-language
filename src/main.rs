@@ -1,4 +1,3 @@
-
 /*fn main() -> Result<(), CompileError> {
   let mut args = std::env::args();
   let file_name = args

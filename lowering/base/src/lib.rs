@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::fmt;
 use types_base::{self as ast, Ast, TypedVar};
 
 pub mod pretty;
@@ -12,6 +13,12 @@ pub struct VarId(usize);
 pub struct Var {
   pub id: VarId,
   pub ty: Type,
+}
+
+impl fmt::Display for VarId {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "var{}", self.0)
+  }
 }
 
 impl PartialOrd for Var {
@@ -41,6 +48,12 @@ impl Var {
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 pub struct TypeVar(usize);
+
+impl fmt::Display for TypeVar {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "T{}", self.0)
+  }
+}
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 pub enum Kind {
@@ -288,11 +301,19 @@ impl LowerAst {
         let ir_arg = self.lower_ast(*arg);
         IR::app(ir_fun, ir_arg)
       }
+      Ast::Hole(_, _) => unreachable!("ICE: Lowering was called on an Ast containing an error"),
     }
   }
 }
 
-pub fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LowerOut {
+  pub ir: IR,
+  pub ty: Type,
+  pub vars: HashMap<ast::Var, VarId>,
+}
+
+pub fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> LowerOut {
   let (ir_ty, types) = lower_ty_scheme(scheme);
   let mut lower_ast = LowerAst {
     supply: VarSupply::default(),
@@ -300,7 +321,11 @@ pub fn lower(ast: Ast<TypedVar>, scheme: ast::TypeScheme) -> (IR, Type) {
   };
   let ir = lower_ast.lower_ast(ast);
   let bound_ir = (0..lower_ast.types.env.len()).fold(ir, |ir, _| IR::ty_fun(Kind::Type, ir));
-  (bound_ir, ir_ty)
+  LowerOut {
+    ir: bound_ir,
+    ty: ir_ty,
+    vars: lower_ast.supply.cache,
+  }
 }
 
 #[cfg(test)]
@@ -309,12 +334,12 @@ mod tests {
 
   use super::*;
   use types_base::builder::AstBuilder;
-  use types_base::{self as ast, type_infer, Ast};
+  use types_base::{self as ast, Ast, type_infer};
 
   fn lower_test(ast: Ast<ast::Var>) -> (IR, Type) {
-    let (ast, scheme) = type_infer(ast).expect("Type inference to succeed");
-    let (ir, ty) = lower(ast, scheme);
-    (ir, ty)
+    let types = type_infer(ast);
+    let lower = lower(types.ast, types.scheme);
+    (lower.ir, lower.ty)
   }
 
   #[test]
@@ -401,7 +426,7 @@ mod tests {
 
     let expect_ir_ty = expect_test::expect![[r#"
         ty_fun [Type, Type, Type] .
-          (T2 -> T1 -> T0) -> (T2 -> T1) -> T2 -> T0"#]];
+          (T2 -> T0 -> T1) -> (T2 -> T0) -> T2 -> T1"#]];
     expect_ir_ty.assert_eq(pretty_string(ir_ty, 80).as_str());
   }
 }

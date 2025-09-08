@@ -1,5 +1,5 @@
-use crate::ty::{Type, Row};
 use crate::Evidence;
+use crate::ty::{Row, Type};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 pub struct Var(pub usize);
@@ -51,14 +51,14 @@ pub enum Ast<V> {
   // Inject a value into a sum type
   Inject(NodeId, Direction, Box<Self>),
   // A reference to a top level definition
-  Item(NodeId, ItemId)
+  Item(NodeId, ItemId),
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct ItemWrapper {
   pub types: Vec<Type>,
   pub rows: Vec<Row>,
-  pub evidence: Vec<Evidence>
+  pub evidence: Vec<Evidence>,
 }
 
 impl<V> Ast<V> {
@@ -73,7 +73,7 @@ impl<V> Ast<V> {
       | Ast::Concat(node_id, _, _)
       | Ast::Project(node_id, _, _)
       | Ast::Branch(node_id, _, _)
-      | Ast::Inject(node_id, _, _) 
+      | Ast::Inject(node_id, _, _)
       | Ast::Item(node_id, _) => *node_id,
     }
   }

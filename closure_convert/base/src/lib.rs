@@ -8,7 +8,7 @@ use std::collections::HashMap;
 mod pretty;
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
-pub struct VarId(usize);
+pub struct VarId(pub usize);
 
 #[derive(Debug, Eq, PartialEq, Clone, Hash)]
 pub struct Var {
@@ -135,10 +135,12 @@ impl IR {
   }
 }
 
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Item {
   pub params: Vec<Var>,
   pub ret_ty: Type,
   pub body: IR,
+  pub name: Option<Var>,
 }
 
 #[derive(Default)]
@@ -201,7 +203,9 @@ fn lower_ty(ty: &lowering::Type) -> Type {
   match ty {
     lowering::Type::Int => Type::Int,
     lowering::Type::Fun(arg, ret) => Type::closure(lower_ty(arg), lower_ty(ret)),
-    lowering::Type::Var(_) | lowering::Type::TyFun(_, _) => panic!("ICE: Type function or variable appeared in closure conversion. This should've been handled by monomorphization."),
+    lowering::Type::Var(_) | lowering::Type::TyFun(_, _) => panic!(
+      "ICE: Type function or variable appeared in closure conversion. This should've been handled by monomorphization."
+    ),
   }
 }
 
@@ -217,16 +221,15 @@ impl ClosureConvert {
     var: Var,
     body: lowering_base::IR,
     env: im::HashMap<lowering::Var, Var>,
+    name: Option<Var>,
   ) -> IR {
     let ret = lower_ty(&body.type_of());
     let mut body = self.convert(body, env);
     let mut free_vars = body.free_vars();
     free_vars.remove(&var);
 
-    let vars: Vec<Var> = 
-      free_vars.iter().cloned().collect();
-    let closure_ty = 
-      Type::closure(var.ty.clone(), ret.clone());
+    let vars: Vec<Var> = free_vars.iter().cloned().collect();
+    let closure_ty = Type::closure(var.ty.clone(), ret.clone());
     let env_var = Var {
       id: self.var_supply.supply(),
       ty: Type::closure_env(
@@ -262,6 +265,7 @@ impl ClosureConvert {
         params,
         ret_ty: ret,
         body,
+        name,
       },
     );
     IR::Closure(closure_ty, item, vars)
@@ -275,10 +279,24 @@ impl ClosureConvert {
         panic!("ICE: Generics appeared after monomorphizing")
       }
       lowering::IR::Local(var, defn, body) => {
-        let defn = self.convert(*defn, env.clone());
         let v = Var {
           id: self.var_supply.supply_for(var.id),
           ty: lower_ty(&var.ty),
+        };
+        let defn = match *defn {
+          lowering::IR::Fun(fun_var, body) => {
+            let var = Var {
+              id: self.var_supply.supply_for(fun_var.id),
+              ty: lower_ty(&fun_var.ty),
+            };
+            self.make_closure(
+              var.clone(),
+              *body,
+              env.update(fun_var, var),
+              Some(v.clone()),
+            )
+          }
+          defn => self.convert(defn, env.clone()),
         };
         let body = self.convert(*body, env.update(var, v.clone()));
         IR::local(v, defn, body)
@@ -288,7 +306,7 @@ impl ClosureConvert {
           id: self.var_supply.supply_for(fun_var.id),
           ty: lower_ty(&fun_var.ty),
         };
-        self.make_closure(var.clone(), *body, env.update(fun_var, var))
+        self.make_closure(var.clone(), *body, env.update(fun_var, var), None)
       }
       lowering::IR::App(fun, arg) => {
         let closure = self.convert(*fun, env.clone());
@@ -299,9 +317,11 @@ impl ClosureConvert {
   }
 }
 
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct ClosureConvertOutput {
   pub item: Item,
   pub closure_items: BTreeMap<ItemId, Item>,
+  pub vars: HashMap<lowering::VarId, VarId>,
 }
 
 pub fn closure_convert(ir: lowering::IR) -> ClosureConvertOutput {
@@ -336,8 +356,10 @@ pub fn closure_convert(ir: lowering::IR) -> ClosureConvertOutput {
       params,
       ret_ty,
       body,
+      name: None,
     },
     closure_items: conversion.items,
+    vars: conversion.var_supply.cache,
   }
 }
 
@@ -345,16 +367,20 @@ pub fn closure_convert(ir: lowering::IR) -> ClosureConvertOutput {
 mod tests {
   use super::*;
   use expect_test::expect;
-  use lowering_base::pretty::pretty_string;
   use lowering_base::lower;
+  use lowering_base::pretty::pretty_string;
   use monomorph_base::trivial_monomorph;
   use simplify_base::simplify;
-  use types_base::{self as ast, type_infer, Ast, builder::{make_vars, AstBuilder}};
+  use types_base::{
+    self as ast, Ast,
+    builder::{AstBuilder, make_vars},
+    type_infer,
+  };
 
   fn test_lamba_lift(ast: Ast<ast::Var>) -> ClosureConvertOutput {
-    let (ast, scheme) = type_infer(ast).expect("Typechecking to succeed");
-    let (ir, _) = lower(ast, scheme);
-    closure_convert(trivial_monomorph(simplify(ir)))
+    let ty_out = type_infer(ast);
+    let lower = lower(ty_out.ast, ty_out.scheme);
+    closure_convert(trivial_monomorph(simplify(lower.ir)))
   }
 
   #[test]

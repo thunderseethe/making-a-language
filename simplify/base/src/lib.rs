@@ -2,7 +2,7 @@ use im::HashMap;
 use std::collections::HashSet;
 use std::ops::ControlFlow;
 
-use lowering_base::{Kind, Type, Var, VarId, IR};
+use lowering_base::{IR, Kind, Type, Var, VarId};
 
 pub enum Param {
   Ty(Kind),
@@ -67,9 +67,7 @@ impl IRExt for IR {
       IR::TyFun(_, ir) => ir.size(),
       IR::TyApp(ir, _) => ir.size(),
       IR::Local(var, defn, body) => {
-        defn.size() 
-          + body.size() 
-          + (if var.ty.is_stack_alloc() { 0 } else { 10 })
+        defn.size() + body.size() + (if var.ty.is_stack_alloc() { 0 } else { 10 })
       }
     }
   }
@@ -299,8 +297,7 @@ impl Simplifier {
       Arg::Val(arg) => {
         !arg.is_trivial()
           || match arg {
-            IR::Var(var) => 
-                matches!(in_scope.get(&var.id), Some(Definition::BoundTo(_, _))),
+            IR::Var(var) => matches!(in_scope.get(&var.id), Some(Definition::BoundTo(_, _))),
             _ => false,
           }
       }
@@ -345,9 +342,7 @@ impl Simplifier {
             );
             // We might have inlined all occurrences of var while simplifying body.
             // If our binding is now dead, remove it.
-            ir = if let Occurrence::Dead = 
-                self.occs.lookup_var(&var) 
-            {
+            ir = if let Occurrence::Dead = self.occs.lookup_var(&var) {
               self.locals_inlined += 1;
               body
             } else {
@@ -452,14 +447,14 @@ impl Simplifier {
 
   fn should_inline(&self, ir: &IR, occ: Occurrence, in_scope: &InScope, ctx: &Context) -> bool {
     match occ {
-      Occurrence::Dead | Occurrence::Once => panic!("ICE: should_inline encountered unexpected dead or once occurrence. This should've been handled prior"),
+      Occurrence::Dead | Occurrence::Once => panic!(
+        "ICE: should_inline encountered unexpected dead or once occurrence. This should've been handled prior"
+      ),
       Occurrence::OnceInFun => ir.is_value() && self.some_benefit(ir, in_scope, ctx),
       Occurrence::Many => {
         let small_enough = ir.size() <= self.inline_size_threshold;
-        ir.is_value()
-          && small_enough 
-          && self.some_benefit(ir, in_scope, ctx)
-      },
+        ir.is_value() && small_enough && self.some_benefit(ir, in_scope, ctx)
+      }
     }
   }
 
@@ -483,16 +478,15 @@ pub fn simplify(mut ir: IR) -> IR {
 #[cfg(test)]
 mod tests {
   use lowering_base::{lower, pretty::pretty_string};
-  use types_base::builder::{make_vars, AstBuilder};
-  use types_base::{self as ast, type_infer, Ast};
+  use types_base::builder::{AstBuilder, make_vars};
+  use types_base::{self as ast, Ast, type_infer};
 
   use super::*;
 
   fn simplify(ast: Ast<ast::Var>) -> IR {
-    let (ast, scheme) = type_infer(ast).expect("Type checking failed");
-    let (ir, _) = lower(ast, scheme);
-    eprintln!("{}", pretty_string(ir.clone(), 80));
-    crate::simplify(ir)
+    let ty_out = type_infer(ast);
+    let lower_out = lower(ty_out.ast, ty_out.scheme);
+    crate::simplify(lower_out.ir)
   }
 
   #[test]

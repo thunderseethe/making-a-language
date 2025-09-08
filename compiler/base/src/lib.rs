@@ -1,17 +1,23 @@
 use std::fmt::Debug;
+use std::str::FromStr;
 use std::sync::Arc;
 
 use desugar_base::DesugarError;
 use name_resolution_base::NameResolutionError;
 use parser_base::rowan::NodeOrToken;
-use parser_base::{all_syntax, Lang, Syntax, SyntaxNode};
+use parser_base::{Lang, Syntax, SyntaxNode, all_syntax};
 
+use serde_json::json;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::lsp_types::{
-  CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
-  DidOpenTextDocumentParams, Hover, HoverContents, HoverParams, HoverProviderCapability,
-  InitializeParams, InitializeResult, InitializedParams, MarkedString, ServerCapabilities,
-  TextDocumentSyncCapability, TextDocumentSyncKind,
+  CompletionOptions, CompletionParams, CompletionResponse, DiagnosticOptions,
+  DiagnosticServerCapabilities, DidChangeTextDocumentParams, DidOpenTextDocumentParams,
+  DocumentDiagnosticReportResult, ExecuteCommandOptions, ExecuteCommandParams,
+  FullDocumentDiagnosticReport, GotoDefinitionParams, GotoDefinitionResponse, HoverParams,
+  HoverProviderCapability, InitializeParams, InitializeResult, LSPAny, OneOf,
+  RelatedFullDocumentDiagnosticReport, RelatedUnchangedDocumentDiagnosticReport,
+  ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
+  UnchangedDocumentDiagnosticReport, Uri,
 };
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 use types_base::TypeError;
@@ -20,7 +26,9 @@ use wasm_bindgen::prelude::*;
 use wasm_streams::{ReadableStream, WritableStream};
 
 mod queries;
-use queries::Database;
+use queries::{Database, graph::DepGraph};
+
+use self::queries::QueryContext;
 
 pub enum CompilerError {
   Desugar(DesugarError),
@@ -62,7 +70,7 @@ pub struct TreeData {
 fn node_type(syn: Syntax) -> NodeSpec {
   NodeSpec {
     id: (syn as u16) as usize,
-    name: format!("{:?}", syn),
+    name: format!("{syn:?}"),
     top: syn == Syntax::Program,
     error: syn == Syntax::Error,
     skipped: false,
@@ -146,6 +154,7 @@ struct PellucidLsp {
   // We only support a single document right now, so we don't need more complicated handling than
   // this.
   database: Arc<Database>,
+  dep_graph: Arc<DepGraph>,
 }
 
 impl PellucidLsp {
@@ -153,7 +162,12 @@ impl PellucidLsp {
     Self {
       client,
       database: Arc::new(Database::default()),
+      dep_graph: Arc::new(DepGraph::default()),
     }
+  }
+
+  fn root_query_context(&self) -> QueryContext {
+    QueryContext::with_root(self.database.clone(), self.dep_graph.clone())
   }
 }
 
@@ -164,14 +178,22 @@ impl LanguageServer for PellucidLsp {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         completion_provider: Some(CompletionOptions::default()),
         text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
+        diagnostic_provider: Some(DiagnosticServerCapabilities::Options(DiagnosticOptions {
+          inter_file_dependencies: false,
+          workspace_diagnostics: true,
+          ..Default::default()
+        })),
+        definition_provider: Some(OneOf::Left(true)),
+        references_provider: Some(OneOf::Left(true)),
+        rename_provider: Some(OneOf::Left(true)),
+        execute_command_provider: Some(ExecuteCommandOptions {
+          commands: vec!["show_trees".to_string(), "compile_wasm".to_string()],
+          ..Default::default()
+        }),
         ..Default::default()
       },
       ..Default::default()
     })
-  }
-
-  async fn initialized(&self, _: InitializedParams) {
-    // TODO: Should we do anything here?
   }
 
   async fn did_open(&self, params: DidOpenTextDocumentParams) {
@@ -180,20 +202,11 @@ impl LanguageServer for PellucidLsp {
       .set_input(params.text_document.uri, params.text_document.text);
   }
 
-  async fn hover(&self, _: HoverParams) -> Result<Option<tower_lsp_server::lsp_types::Hover>> {
-    Ok(Some(Hover {
-      range: None,
-      contents: HoverContents::Scalar(MarkedString::from_language_code(
-        "pellucid".to_string(),
-        "test hover".to_string(),
-      )),
-    }))
-  }
-
   async fn did_change(&self, params: DidChangeTextDocumentParams) {
     let uri = params.text_document.uri;
-    let newlines = self.database.newlines_of(uri.clone());
-    let mut content = self.database.content_of(uri.clone());
+    let ctx = self.root_query_context();
+    let newlines = ctx.newlines_of(uri.clone());
+    let mut content = ctx.content_of(uri.clone());
     for change in params.content_changes {
       if let Some(range) = change.range {
         if let Some(bytes) = newlines.byte_range_for(range) {
@@ -211,21 +224,119 @@ impl LanguageServer for PellucidLsp {
         content = change.text
       }
     }
-    web_sys::console::log_1(&JsValue::from_str(&content));
     self.database.set_input(uri.clone(), content);
-    let diags = self.database.diagnostics(uri.clone());
+    let diags = ctx.diagnostics(uri.clone());
     self
       .client
-      .publish_diagnostics(
-        uri,
-        diags,
-        Some(params.text_document.version),
-      )
+      .publish_diagnostics(uri, diags, Some(params.text_document.version))
       .await;
   }
 
-  async fn completion(&self, _: CompletionParams) -> Result<Option<CompletionResponse>> {
-    Ok(None)
+  async fn diagnostic(
+    &self,
+    params: tower_lsp_server::lsp_types::DocumentDiagnosticParams,
+  ) -> Result<DocumentDiagnosticReportResult> {
+    let ctx = self.root_query_context();
+    let diags = ctx.diagnostics(params.text_document.uri);
+    if diags.is_empty() {
+      return Ok(DocumentDiagnosticReportResult::Report(
+        RelatedUnchangedDocumentDiagnosticReport {
+          related_documents: None,
+          unchanged_document_diagnostic_report: UnchangedDocumentDiagnosticReport {
+            result_id: "unchanged".to_string(),
+          },
+        }
+        .into(),
+      ));
+    }
+    Ok(DocumentDiagnosticReportResult::Report(
+      RelatedFullDocumentDiagnosticReport {
+        related_documents: None,
+        full_document_diagnostic_report: FullDocumentDiagnosticReport {
+          result_id: None,
+          items: diags,
+        },
+      }
+      .into(),
+    ))
+  }
+
+  async fn goto_definition(
+    &self,
+    params: GotoDefinitionParams,
+  ) -> Result<Option<GotoDefinitionResponse>> {
+    let ctx = self.root_query_context();
+    let uri = params.text_document_position_params.text_document.uri;
+
+    let Some(range) = ctx.definition_of(uri.clone(), params.text_document_position_params.position)
+    else {
+      return Ok(None);
+    };
+    Ok(Some(GotoDefinitionResponse::Scalar(
+      tower_lsp_server::lsp_types::Location {
+        // This could be different once we have different files, but for now uri is always the same.
+        uri,
+        range,
+      },
+    )))
+  }
+
+  async fn hover(&self, params: HoverParams) -> Result<Option<tower_lsp_server::lsp_types::Hover>> {
+    let uri = params.text_document_position_params.text_document.uri;
+    let position = params.text_document_position_params.position;
+    let ctx = self.root_query_context();
+    let Some(sync_node) = ctx.syntax_node_starting_at(uri.clone(), position) else {
+      web_sys::console::log_1(&JsValue::from_str(&format!(
+        "No node start at {position:?}"
+      )));
+      return Ok(None);
+    };
+    Ok(ctx.hover_of(uri.clone(), sync_node.clone()))
+  }
+
+  async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+    let ctx = self.root_query_context();
+    let completions = ctx.completion_of(
+      params.text_document_position.text_document.uri,
+      params.text_document_position.position,
+    );
+    Ok(completions)
+  }
+
+  async fn execute_command(&self, params: ExecuteCommandParams) -> Result<Option<LSPAny>> {
+    match params.command.as_str() {
+      "show_trees" => {
+        let LSPAny::String(string) = &params.arguments[0] else {
+          return Err(tower_lsp_server::jsonrpc::Error {
+            code: tower_lsp_server::jsonrpc::ErrorCode::InvalidParams,
+            message: "Expected a string as first argument to \"show_trees\" command".into(),
+            data: None,
+          });
+        };
+        let uri = Uri::from_str(string.as_str()).expect("Invalid Uri passed to command");
+        let ctx = self.root_query_context();
+        let json = ctx.show_trees_of(uri);
+
+        Ok(Some(json))
+      }
+      "compile_wasm" => {
+        let LSPAny::String(string) = &params.arguments[0] else {
+          return Err(tower_lsp_server::jsonrpc::Error {
+            code: tower_lsp_server::jsonrpc::ErrorCode::InvalidParams,
+            message: "Expected a string as first argument to \"compile_wasm\" command".into(),
+            data: None,
+          });
+        };
+        let uri = Uri::from_str(string.as_str()).expect("Invalid Uri passed to command");
+        let ctx = self.root_query_context();
+        let wasm_bytes = ctx.wasm_of(uri.clone());
+
+        Ok(Some(json!({
+          "wasm_bytes": wasm_bytes
+        })))
+      }
+      _ => Ok(None),
+    }
   }
 
   async fn shutdown(&self) -> Result<()> {

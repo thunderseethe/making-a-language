@@ -1,6 +1,6 @@
 use pretty::{DocAllocator, DocBuilder, Pretty, RcAllocator};
 
-use super::{Kind, Type, TypeVar, Var, VarId, IR};
+use super::{IR, Kind, Type, TypeVar, Var, VarId};
 
 impl<'a, D, A> Pretty<'a, D, A> for VarId
 where

@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use ena::unify::InPlaceUnificationTable;
 
-pub use self::ast::{Ast, Direction, ItemId, TypedVar, Var, NodeId, ItemWrapper};
+pub use self::ast::{Ast, Direction, ItemId, ItemWrapper, NodeId, TypedVar, Var};
 use self::subst::SubstOut;
 pub use self::ty::{ClosedRow, Row, RowCombination, RowVar, Type, TypeVar};
 use self::ty::{RowUniVar, TypeUniVar};
@@ -432,7 +432,10 @@ mod tests {
     assert_eq!(
       ty_chk_res,
       Err(TypeError {
-        kind: TypeErrorKind::TypeNotEqual((Type::fun(Type::Int, Type::Unifier(TypeUniVar { id: 1 })), Type::Int)),
+        kind: TypeErrorKind::TypeNotEqual((
+          Type::fun(Type::Int, Type::Unifier(TypeUniVar { id: 1 })),
+          Type::Int
+        )),
         node_id: NodeId(1)
       })
     );
@@ -535,8 +538,7 @@ mod tests {
     let b = AstBuilder::default();
     let ast = b.make_funs(|[m, n]| {
       b.unlabel(
-        b.project(Direction::Left, 
-          b.concat(b.var(m), b.var(n))),
+        b.project(Direction::Left, b.concat(b.var(m), b.var(n))),
         "x",
       )
     });
@@ -576,9 +578,7 @@ mod tests {
     let a = TypeVar(0);
 
     let b = AstBuilder::default();
-    let ast = b.make_funs(|[x, y]| {
-      b.app(b.var(y), b.var(x))
-    }); 
+    let ast = b.make_funs(|[x, y]| b.app(b.var(y), b.var(x)));
     let signature = TypeScheme {
       unbound_tys: set![a],
       unbound_rows: set![],
@@ -605,12 +605,7 @@ mod tests {
     let wand = ItemId(0);
 
     let b = AstBuilder::default();
-    let ast = b.make_funs(|[m]| {
-      b.app(
-        b.app(b.item(wand), b.var(m)),
-        b.label("y", b.int(3))
-      )
-    });
+    let ast = b.make_funs(|[m]| b.app(b.app(b.item(wand), b.var(m)), b.label("y", b.int(3))));
 
     let r = RowVar(0);
     let s = RowVar(1);
@@ -639,8 +634,7 @@ mod tests {
 
     let item_source = ItemSource::from_iter([(wand, wand_scheme)]);
 
-    let out =
-      type_infer_with_items(item_source, ast).expect("Expected type inference to succeed");
+    let out = type_infer_with_items(item_source, ast).expect("Expected type inference to succeed");
 
     let y_unused = RowVar(0);
     let goal = RowVar(1);

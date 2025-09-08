@@ -17,47 +17,74 @@ pub enum NameResolutionError {
   UndefinedVar(NodeId, String),
 }
 
-fn resolve(
-  supply: &mut VarSupply,
-  ast: Ast<String>,
-  env: im::HashMap<String, Var>,
-) -> Result<Ast<Var>, NameResolutionError> {
-  match ast {
-    Ast::Var(id, v) => env
-      .get(&v)
-      .copied()
-      .map(|v| Ast::Var(id, v))
-      .ok_or(NameResolutionError::UndefinedVar(id, v)),
-    Ast::Int(id, i) => Ok(Ast::Int(id, i)),
-    Ast::Fun(id, name, body) => {
-      let var = supply.supply();
-      let body = resolve(supply, *body, env.update(name, var))?;
-      Ok(Ast::fun(id, var, body))
-    }
-    Ast::App(id, fun, arg) => {
-      let fun = resolve(supply, *fun, env.clone())?;
-      let arg = resolve(supply, *arg, env)?;
-      Ok(Ast::app(id, fun, arg))
+#[derive(Default)]
+struct NameResolution {
+  supply: VarSupply,
+  names: std::collections::HashMap<Var, String>,
+  errors: Vec<NameResolutionError>,
+}
+
+impl NameResolution {
+  fn resolve(&mut self, ast: Ast<String>, env: im::HashMap<String, Var>) -> Ast<Var> {
+    match ast {
+      Ast::Var(id, name) => match env.get(&name).copied() {
+        Some(v) => Ast::Var(id, v),
+        None => {
+          println!("{env:?}");
+          self
+            .errors
+            .push(NameResolutionError::UndefinedVar(id, name));
+          let var = self.supply.supply();
+          Ast::Hole(id, var)
+        }
+      },
+      Ast::Int(id, i) => Ast::Int(id, i),
+      Ast::Hole(id, _) => {
+        let var = self.supply.supply();
+        Ast::Hole(id, var)
+      }
+      Ast::Fun(id, name, body) => {
+        let var = self.supply.supply();
+        self.names.insert(var, name.clone());
+        let body = self.resolve(*body, env.update(name, var));
+        Ast::fun(id, var, body)
+      }
+      Ast::App(id, fun, arg) => {
+        let fun = self.resolve(*fun, env.clone());
+        let arg = self.resolve(*arg, env);
+        Ast::app(id, fun, arg)
+      }
     }
   }
 }
 
-pub fn name_resolution(ast: Ast<String>) -> Result<Ast<Var>, NameResolutionError> {
-  let mut supply = VarSupply::default();
-  resolve(&mut supply, ast, im::HashMap::default())
+pub struct NameResolutionOut {
+  pub ast: Ast<Var>,
+  pub errors: Vec<NameResolutionError>,
+  pub names: std::collections::HashMap<Var, String>,
+}
+
+pub fn name_resolution(ast: Ast<String>) -> NameResolutionOut {
+  let mut nameres = NameResolution::default();
+  let ast = nameres.resolve(ast, im::HashMap::default());
+  NameResolutionOut {
+    ast,
+    errors: nameres.errors,
+    names: nameres.names,
+  }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use types_base::builder::AstBuilder;
   use types_base::Ast;
+  use types_base::builder::AstBuilder;
 
-  fn name_resolve(input: &str) -> Result<Ast<Var>, NameResolutionError> {
+  fn name_resolve(input: &str) -> (Ast<Var>, Vec<NameResolutionError>) {
     let (cst, _) = parser_base::parse(input);
-    let (ast, _) = desugar_base::desugar(cst)
-        .expect("Desugar to succeed");
-    name_resolution(ast)
+    let desugar = desugar_base::desugar(cst);
+    let nameres = name_resolution(desugar.ast);
+    (nameres.ast, nameres.errors)
   }
 
   #[test]
@@ -69,17 +96,18 @@ mod tests {
     y x"#;
 
     let b = AstBuilder::default();
-    let ast = name_resolve(input);
+    let (ast, errors) = name_resolve(input);
     assert_eq!(
       ast,
-      Ok(b.locals(
+      b.locals(
         [
           (Var(0), b.fun(Var(4), b.var(Var(4)))),
           (Var(1), b.fun(Var(3), b.var(Var(0)))),
           (Var(2), b.int(3))
         ],
         b.app(b.var(Var(1)), b.var(Var(2))),
-      ))
+      )
     );
+    assert_eq!(errors, vec![]);
   }
 }
