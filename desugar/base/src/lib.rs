@@ -1,9 +1,7 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
 
-use parser_base::rowan::GreenNode;
-use parser_base::rowan::ast::SyntaxNodePtr;
-use parser_base::{Lang, Syntax, SyntaxNode};
+use parser_base::{rowan::{ast::SyntaxNodePtr, GreenNode, SyntaxNode}, Lang, Syntax};
 use types_base::{Ast, NodeId};
 
 #[derive(Debug, PartialEq, Eq, Clone)]

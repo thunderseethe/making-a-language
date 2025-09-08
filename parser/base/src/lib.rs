@@ -5,7 +5,6 @@ use bit_set::BitSet;
 use enum_iterator::{Sequence, all};
 use logos::{Logos, SpannedIter};
 pub use rowan;
-pub use rowan::api::{SyntaxNode, SyntaxToken};
 use rowan::{GreenNode, GreenNodeBuilder, SyntaxKind};
 
 pub type Cst = GreenNode;
@@ -374,7 +373,9 @@ pub fn parse(input: &str) -> (GreenNode, Vec<ParseError>) {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
+  use rowan::SyntaxNode;
+
+use super::*;
 
   #[test]
   fn parsing_multiple_lets_and_multiple_apps() {

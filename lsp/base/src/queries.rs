@@ -12,10 +12,7 @@ use dashmap::DashMap;
 use desugar_base::{DesugarError, SyncNode};
 use lowering_base::{IR, LowerOut};
 use name_resolution_base::NameResolutionError;
-use parser_base::rowan::NodeOrToken;
-use parser_base::rowan::ast::SyntaxNodePtr;
-use parser_base::{Cst, Lang, ParseError, SyntaxNode, rowan::TextSize};
-use parser_base::{Syntax, SyntaxToken};
+use parser_base::{rowan::{ast::SyntaxNodePtr, NodeOrToken, TextSize, SyntaxNode, SyntaxToken}, Cst, Lang, ParseError, Syntax};
 use serde_json::json;
 use tower_lsp_server::lsp_types::{
   CompletionItem, CompletionItemKind, CompletionResponse, Diagnostic, Hover, HoverContents, LSPAny,

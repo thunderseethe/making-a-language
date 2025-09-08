@@ -4,8 +4,7 @@ use std::sync::Arc;
 
 use desugar_base::DesugarError;
 use name_resolution_base::NameResolutionError;
-use parser_base::rowan::NodeOrToken;
-use parser_base::{Lang, Syntax, SyntaxNode, all_syntax};
+use parser_base::{rowan::{NodeOrToken, SyntaxNode}, Lang, Syntax, all_syntax};
 
 use serde_json::json;
 use tower_lsp_server::jsonrpc::Result;

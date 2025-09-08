@@ -18,7 +18,7 @@ members = [
   "parser/base", 
   "desugar/base",
   "name_resolution/base", 
-  "compiler/base",
+  "lsp/base",
 ]
 
 [workspace.package]
@@ -37,7 +37,7 @@ emit-base = { path = "emit/base" }
 parser-base = { path = "parser/base" }
 desugar-base = { path = "desugar/base" }
 name-resolution-base = { path = "name_resolution/base" }
-compiler-base = { path = "compiler/base" }
+lsp-base = { path = "lsp/base" }
 
 ena = "0.14.2"
 expect-test = "1.5.1"
