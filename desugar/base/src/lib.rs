@@ -85,6 +85,9 @@ impl Desugar {
     binds.into_iter().rfold(body, |body, (var, arg, child)| {
       let app_id = self.next_id();
       let fun_id = self.next_id();
+      if let Some(let_binder) = child.first_child_by_kind(&|kind| kind == Syntax::LetBinder) {
+        self.insert_node(fun_id, SyntaxNodePtr::new(&let_binder));
+      }
       self.insert_node(app_id, SyntaxNodePtr::new(&child));
       Ast::app(app_id, Ast::fun(fun_id, var, body), arg)
     })

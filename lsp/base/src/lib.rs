@@ -1,13 +1,15 @@
-use std::fmt::Debug;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::{collections::HashMap, fmt::Debug};
 
 use desugar_base::DesugarError;
 use name_resolution_base::NameResolutionError;
-use parser_base::{rowan::{NodeOrToken, SyntaxNode}, Lang, Syntax, all_syntax};
+use parser_base::{
+  Lang, Syntax, all_syntax,
+  rowan::{NodeOrToken, SyntaxNode},
+};
 
 use serde_json::json;
-use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::lsp_types::{
   CompletionOptions, CompletionParams, CompletionResponse, DiagnosticOptions,
   DiagnosticServerCapabilities, DidChangeTextDocumentParams, DidOpenTextDocumentParams,
@@ -19,6 +21,10 @@ use tower_lsp_server::lsp_types::{
   UnchangedDocumentDiagnosticReport, Uri,
 };
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
+use tower_lsp_server::{
+  jsonrpc::Result,
+  lsp_types::{Location, ReferenceParams, RenameParams, TextEdit, WorkspaceEdit},
+};
 use types_base::TypeError;
 
 use wasm_bindgen::prelude::*;
@@ -280,14 +286,43 @@ impl LanguageServer for PellucidLsp {
     )))
   }
 
+  async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+    let ctx = self.root_query_context();
+    let uri = params.text_document_position.text_document.uri;
+    let cursor = params.text_document_position.position;
+
+    let locs = ctx.reference_at(uri, cursor);
+    Ok(locs)
+  }
+
+  async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+    let ctx = self.root_query_context();
+    let uri = params.text_document_position.text_document.uri;
+    let cursor = params.text_document_position.position;
+    let new_name = params.new_name;
+
+    Ok(ctx.reference_at(uri, cursor).map(|locs| {
+      #[allow(clippy::mutable_key_type)]
+      let mut changes = HashMap::default();
+      for loc in locs {
+        let edits = changes.entry(loc.uri).or_insert(vec![]);
+        edits.push(TextEdit {
+          range: loc.range,
+          new_text: new_name.clone(),
+        });
+      }
+      WorkspaceEdit {
+        changes: Some(changes),
+        ..Default::default()
+      }
+    }))
+  }
+
   async fn hover(&self, params: HoverParams) -> Result<Option<tower_lsp_server::lsp_types::Hover>> {
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
     let ctx = self.root_query_context();
     let Some(sync_node) = ctx.syntax_node_starting_at(uri.clone(), position) else {
-      web_sys::console::log_1(&JsValue::from_str(&format!(
-        "No node start at {position:?}"
-      )));
       return Ok(None);
     };
     Ok(ctx.hover_of(uri.clone(), sync_node.clone()))

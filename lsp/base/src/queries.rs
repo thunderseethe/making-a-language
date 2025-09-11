@@ -12,11 +12,14 @@ use dashmap::DashMap;
 use desugar_base::{DesugarError, SyncNode};
 use lowering_base::{IR, LowerOut};
 use name_resolution_base::NameResolutionError;
-use parser_base::{rowan::{ast::SyntaxNodePtr, NodeOrToken, TextSize, SyntaxNode, SyntaxToken}, Cst, Lang, ParseError, Syntax};
+use parser_base::{
+  Cst, Lang, ParseError, Syntax,
+  rowan::{NodeOrToken, SyntaxNode, SyntaxToken, TextSize, ast::SyntaxNodePtr},
+};
 use serde_json::json;
 use tower_lsp_server::lsp_types::{
   CompletionItem, CompletionItemKind, CompletionResponse, Diagnostic, Hover, HoverContents, LSPAny,
-  LanguageString, MarkedString, Position, Range as LspRange, Uri,
+  LanguageString, Location, MarkedString, Position, Range as LspRange, Uri,
 };
 use types_base::{Ast, Mark, NodeId, Type, TypeScheme, TypedVar, Var};
 
@@ -100,6 +103,7 @@ pub(crate) enum QueryKey {
   ScopeOf(Uri, Position),
   CompletionOf(Uri, Position),
   DefinitionOf(Uri, Position),
+  ReferenceOf(Uri, Position),
   ShowTreesOf(Uri),
   IrOf(Uri),
   SimpleIrOf(Uri),
@@ -156,6 +160,7 @@ pub struct Database {
   node_starting_at_query: DashMap<QueryKey, Option<SyncNode>>,
   completion_query: DashMap<QueryKey, Option<CompletionResponse>>,
   definition_query: DashMap<QueryKey, Option<LspRange>>,
+  reference_query: DashMap<QueryKey, Option<Vec<Location>>>,
   scope_query: DashMap<QueryKey, Option<HashMap<String, String>>>,
   show_trees_query: DashMap<QueryKey, LSPAny>,
   ir_query: DashMap<QueryKey, Option<LowerOut>>,
@@ -290,6 +295,9 @@ impl QueryContext {
       }
       QueryKey::DefinitionOf(uri, cursor) => {
         let _ = self.definition_of(uri, cursor);
+      }
+      QueryKey::ReferenceOf(uri, cursor) => {
+        let _ = self.reference_at(uri, cursor);
       }
       QueryKey::ScopeOf(uri, cursor) => {
         let _ = self.scope_at(uri, cursor);
@@ -586,6 +594,47 @@ impl QueryContext {
     )
   }
 
+  pub fn reference_at(&self, uri: Uri, cursor: Position) -> Option<Vec<Location>> {
+    self.query(
+      QueryKey::ReferenceOf(uri.clone(), cursor),
+      &self.db.reference_query,
+      |this, _| {
+        let sync_node = this.syntax_node_starting_at(uri.clone(), cursor)?;
+        let ast_node = this.ast_node_of(uri.clone(), sync_node)?;
+        let var = match ast_node {
+          Ast::Var(_, var) | Ast::Fun(_, var, _) => var,
+          _ => return None,
+        };
+        let ast_to_cst = self.desugar_of(uri.clone()).ast_to_cst;
+        let ast = self.nameresolve_of(uri.clone()).ast;
+
+        let newlines = self.newlines_of(uri.clone());
+        let vars = ast.var_reference(&var.0);
+        Some(vars.into_iter().filter_map(|var| {
+          let id = var.id();
+          let sync_node = ast_to_cst.get(&id).or_else(|| {
+            let Ast::Fun(_, _, _) = var else {
+              return None;
+            };
+            let parent_id = ast.parent_of(id)?.id();
+            ast_to_cst.get(&parent_id)
+          })?;
+          let root = SyntaxNode::new_root(sync_node.root.clone());
+          let mut syntax = sync_node.ptr.to_node(&root);
+          if [Syntax::Fun, Syntax::Let].contains(&syntax.kind()) {
+            syntax = syntax.first_child_by_kind(&|kind| [Syntax::LetBinder, Syntax::FunBinder].contains(&kind))?;
+          }
+          let token = syntax.first_token()?;
+          let range = newlines.lsp_range_for(token.text_range().into())?;
+          Some(Location {
+            uri: uri.clone(),
+            range
+          })
+        }).collect())
+      },
+    )
+  }
+
   pub fn syntax_node_starting_at(&self, uri: Uri, cursor: Position) -> Option<SyncNode> {
     self.query(
       QueryKey::NodeStartingAt(uri, cursor),
@@ -601,8 +650,19 @@ impl QueryContext {
           .byte_of(cursor.line, cursor.character)?
           .try_into()
           .unwrap();
-        let mut token = cst.token_at_offset(TextSize::from(byte));
-        let token = token.next()?;
+        let token = cst.token_at_offset(TextSize::from(byte));
+        let token = match token {
+            parser_base::rowan::TokenAtOffset::None => return None,
+            parser_base::rowan::TokenAtOffset::Single(token) => token,
+            // Bias away from whitespace as it's unlikely to be what we want.
+            // Bias towards identifiers, as they're more likely to be semantically interesting.
+            // Othewrise choose the left one
+            parser_base::rowan::TokenAtOffset::Between(left, right) => match (left.kind(), right.kind()) {
+              (_, Syntax::Whitespaces) | (Syntax::Identifier, _) => left,
+              (Syntax::Whitespaces, _) | (_, Syntax::Identifier) => right,
+              _ => left
+            },
+        };
         let node = token.parent()?;
         Some(SyncNode {
           root: green,
@@ -1165,11 +1225,13 @@ impl QueryContext {
   }
 }
 
-trait Find {
+trait Find<T> {
   fn find(&self, id: NodeId) -> Option<&Self>;
+
+  fn var_reference(&self, var: &T) -> Vec<&Self>;
 }
-impl<T> Find for Ast<T> {
-  fn find(&self, id: NodeId) -> Option<&Ast<T>> {
+impl<T: PartialEq> Find<T> for Ast<T> {
+  fn find(&self, id: NodeId) -> Option<&Self> {
     match self {
       Ast::Var(node_id, _) | Ast::Hole(node_id, _) | Ast::Int(node_id, _) => {
         (node_id == &id).then_some(self)
@@ -1187,6 +1249,33 @@ impl<T> Find for Ast<T> {
         fun.find(id).or_else(|| arg.find(id))
       }
     }
+  }
+
+  fn var_reference(&self, needle: &T) -> Vec<&Self> {
+    fn aux<'a, T: PartialEq>(ast: &'a Ast<T>, needle: &T, vec: &mut Vec<&'a Ast<T>>) {
+      match ast {
+        Ast::Var(_, var) => {
+          if var == needle {
+            vec.push(ast);
+          }
+        }
+        Ast::Int(_, _) => {}
+        Ast::Fun(_, var, body) => {
+          if var == needle {
+            vec.push(ast);
+          }
+          aux(body, needle, vec);
+        }
+        Ast::App(_, arg, fun) => {
+          aux(arg, needle, vec);
+          aux(fun, needle, vec);
+        }
+        Ast::Hole(_, _) => {}
+      }
+    }
+    let mut vec = vec![];
+    aux(self, needle, &mut vec);
+    vec
   }
 }
 

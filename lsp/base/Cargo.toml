@@ -1,5 +1,5 @@
 [package]
-name = "compiler-base"
+name = "lsp-base"
 version = "0.1.0"
 edition.workspace = true
 
