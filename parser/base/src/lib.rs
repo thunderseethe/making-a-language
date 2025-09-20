@@ -1,8 +1,8 @@
 use std::iter::Peekable;
 use std::ops::{ControlFlow, Range};
 
-use bit_set::BitSet;
 use enum_iterator::{Sequence, all};
+use im::{HashSet, hashset};
 use logos::{Logos, SpannedIter};
 pub use rowan;
 use rowan::{GreenNode, GreenNodeBuilder, SyntaxKind};
@@ -50,13 +50,6 @@ pub enum Syntax {
   Program,
 }
 
-impl Syntax {
-  fn raw(&self) -> u16 {
-    let kind: SyntaxKind = (*self).into();
-    kind.0
-  }
-}
-
 pub fn all_syntax() -> impl Iterator<Item = Syntax> {
   all::<Syntax>()
 }
@@ -102,8 +95,8 @@ impl<'a> Input<'a> {
     }
   }
 
-  fn at_any(&mut self, recovery_set: &BitSet) -> bool {
-    recovery_set.contains(self.peek().raw().into())
+  fn at_any(&mut self, recovery_set: HashSet<Syntax>) -> bool {
+    recovery_set.contains(&self.peek())
   }
 }
 
@@ -127,19 +120,10 @@ impl rowan::Language for Lang {
   }
 }
 
-fn bitset(syntax: impl IntoIterator<Item = Syntax>) -> BitSet {
-  let mut bit_set = BitSet::new();
-  for syn in syntax {
-    let kind: SyntaxKind = syn.into();
-    bit_set.insert(kind.0.into());
-  }
-  bit_set
-}
-
-fn unioning(bitset: &BitSet, syntax: impl IntoIterator<Item = Syntax>) -> BitSet {
-  let mut bs = bitset.clone();
-  bs.extend(syntax.into_iter().map(|s| s.raw().into()));
-  bs
+fn unioning(orig: &HashSet<Syntax>, syntax: impl IntoIterator<Item = Syntax>) -> HashSet<Syntax> {
+  let mut set = orig.clone();
+  set.extend(syntax);
+  set
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,7 +138,6 @@ struct Parser<'a> {
   errors: Vec<ParseError>,
   in_error: bool,
 }
-
 impl<'a> Parser<'a> {
   fn new(content: &'a str) -> Self {
     Self {
@@ -175,9 +158,9 @@ impl<'a> Parser<'a> {
     res
   }
 
-  fn recover_until(&mut self, anchor: &BitSet, expected: Vec<Syntax>) -> ControlFlow<()> {
+  fn recover_until(&mut self, anchor: HashSet<Syntax>, expected: Vec<Syntax>) {
     let mut discard_toks = vec![];
-    while !self.input.at_any(anchor) {
+    while !self.input.at_any(anchor.clone()) {
       let tok = self.input.peek();
       let Some(span) = self.input.advance() else {
         break;
@@ -202,7 +185,7 @@ impl<'a> Parser<'a> {
             }),
         });
       }
-      return ControlFlow::Break(());
+      return;
     }
 
     // This is safe because discard_toks is not empty.
@@ -220,61 +203,61 @@ impl<'a> Parser<'a> {
         span: err_span,
       });
     }
-    ControlFlow::Continue(())
+    
   }
 
-  fn expect(&mut self, token: Syntax, anchor: &BitSet) -> Option<usize> {
+  fn ate(&mut self, token: Syntax) -> ControlFlow<()> {
+    let Some(str) = self.input.eat(token) else {
+      // We didn't consume the right token so continue.
+      return ControlFlow::Continue(());
+    };
+    self.in_error = false;
+    self.builder.token(token.into(), str);
+    self.whitespace();
+    // We consumed the expected token, so we break to return early.
+    ControlFlow::Break(())
+  }
+
+  fn expect(&mut self, token: Syntax, mut anchor: HashSet<Syntax>) {
     // Happy path
-    if let Some(str) = self.input.eat(token) {
-      self.in_error = false;
-      self.builder.token(token.into(), str);
-      let len = str.len();
-      self.whitespace();
-      return Some(len);
-    }
-    // Error recovery
-    let mut bs = BitSet::new();
-    bs.insert(token.raw().into());
-    bs.union_with(anchor);
-    let _ = self.recover_until(&bs, vec![token]);
+    let ControlFlow::Continue(_) = self.ate(token) else {
+      // If `ate` returns break, it consumed the expected token and we are done.
+      return;
+    };
+    // Otherwise, start error recovery
+    // We can always recover to our expected token, so ensure it's in the anchor set.
+    anchor.insert(token);
+    self.recover_until(anchor, vec![token]);
     // We might have recovered to our expected token in which case we want to consume it to get
     // us back on track. We don't want to recurse, because that might not terminate, so we just
     // encode a singularly secondary check.
-    if let Some(str) = self.input.eat(token) {
-      self.in_error = false;
-      self.builder.token(token.into(), str);
-      let len = str.len();
-      self.whitespace();
-      return Some(len);
-    }
-    None
+    let _ = self.ate(token);
   }
 
-  fn atom(&mut self, anchor: &BitSet) -> ControlFlow<()> {
-    // TODO: Figure out where this goes.
+  fn atom(&mut self, anchor: HashSet<Syntax>) -> ControlFlow<()> {
     match self.input.peek() {
-      Syntax::LeftParen => {
-        self.with(Syntax::ParenthesizedExpr, |this| {
-          this.expect(Syntax::LeftParen, anchor);
-          this.expr(&unioning(anchor, [Syntax::RightParen]));
-          this.expect(Syntax::RightParen, anchor);
-        });
-      }
-      Syntax::Backslash => {
-        self.with(Syntax::Fun, |this| {
-          this.expect(Syntax::Backslash, anchor);
-          this.with(Syntax::FunBinder, |this| {
-            this.expect(Syntax::Identifier, anchor)
-          });
-          this.expect(Syntax::Arrow, anchor);
-          this.expr(anchor);
-        });
-      }
       Syntax::Identifier => {
         self.with(Syntax::Var, |this| this.expect(Syntax::Identifier, anchor));
       }
       Syntax::Int => {
         self.with(Syntax::IntegerExpr, |this| this.expect(Syntax::Int, anchor));
+      }
+      Syntax::LeftParen => {
+        self.with(Syntax::ParenthesizedExpr, |this| {
+          this.expect(Syntax::LeftParen, anchor.clone());
+          this.expr(unioning(&anchor, [Syntax::RightParen]));
+          this.expect(Syntax::RightParen, anchor);
+        });
+      }
+      Syntax::Backslash => {
+        self.with(Syntax::Fun, |this| {
+          this.expect(Syntax::Backslash, anchor.clone());
+          this.with(Syntax::FunBinder, |this| {
+            this.expect(Syntax::Identifier, anchor.clone())
+          });
+          this.expect(Syntax::Arrow, anchor.clone());
+          this.expr(anchor);
+        });
       }
       _ => {
         return ControlFlow::Break(());
@@ -285,55 +268,65 @@ impl<'a> Parser<'a> {
   }
 
   // A series of applications.
-  fn app(&mut self, anchor: &BitSet) -> ControlFlow<()> {
+  fn app(&mut self, anchor: HashSet<Syntax>) {
     let checkpoint = self.builder.checkpoint();
 
-    let ControlFlow::Continue(()) = self.atom(anchor) else {
+    let ControlFlow::Continue(()) = self.atom(anchor.clone()) else {
       // An application must have atleast one atom within it
-      return self.recover_until(anchor, vec![Syntax::Expr]);
+      self.recover_until(anchor, vec![Syntax::Expr]);
+      return;
     };
 
-    let ControlFlow::Continue(()) = self.atom(anchor) else {
-      return ControlFlow::Continue(());
+    let ControlFlow::Continue(()) = self.atom(anchor.clone()) else {
+      return;
     };
 
     self.builder.start_node_at(checkpoint, Syntax::App.into());
     self.builder.finish_node();
 
-    while let ControlFlow::Continue(()) = self.atom(anchor) {
+    while let ControlFlow::Continue(()) = self.atom(anchor.clone()) {
       self.builder.start_node_at(checkpoint, Syntax::App.into());
       self.builder.finish_node();
     }
-
-    ControlFlow::Continue(())
   }
 
-  fn expr(&mut self, anchor: &BitSet) {
-    let checkpoint = self.builder.checkpoint();
+  fn let_(&mut self, anchor: HashSet<Syntax>) {
+    self.with(Syntax::Let, |this| {
+      this.expect(
+        Syntax::LetKw,
+        unioning(
+          &anchor,
+          [Syntax::Identifier, Syntax::Equal, Syntax::Semicolon],
+        ),
+      );
+      this.with(Syntax::LetBinder, |this| {
+        this.expect(
+          Syntax::Identifier,
+          unioning(&anchor, [Syntax::Equal, Syntax::Semicolon]),
+        )
+      });
+      this.expect(Syntax::Equal, unioning(&anchor, [Syntax::Semicolon]));
+      this.expr(unioning(&anchor, [Syntax::Semicolon, Syntax::LetKw]));
+      this.expect(Syntax::Semicolon, unioning(&anchor, [Syntax::LetKw]));
+    })
+  }
 
+  fn expr(&mut self, anchor: HashSet<Syntax>) {
+    self.with(Syntax::Expr, |this| {
+      while this.input.at(Syntax::LetKw) {
+        this.let_(anchor.clone());
+      }
+      this.app(anchor);
+    });
+    //let checkpoint = self.builder.checkpoint();
+
+    /*
     // If we consumed anything, even an error, wrap as an expression
     let mut did_consume_let = false;
     self.whitespace();
     while self.input.at(Syntax::LetKw) {
       did_consume_let = true;
-      self.with(Syntax::Let, |this| {
-        this.expect(
-          Syntax::LetKw,
-          &unioning(
-            anchor,
-            [Syntax::Identifier, Syntax::Equal, Syntax::Semicolon],
-          ),
-        );
-        this.with(Syntax::LetBinder, |this| {
-          this.expect(
-            Syntax::Identifier,
-            &unioning(anchor, [Syntax::Equal, Syntax::Semicolon]),
-          )
-        });
-        this.expect(Syntax::Equal, &unioning(anchor, [Syntax::Semicolon]));
-        this.expr(&unioning(anchor, [Syntax::Semicolon, Syntax::LetKw]));
-        this.expect(Syntax::Semicolon, &unioning(anchor, [Syntax::LetKw]));
-      })
+      self.let_(anchor.clone());
     }
 
     let did_consume_app = matches!(self.app(anchor), ControlFlow::Continue(()));
@@ -343,39 +336,43 @@ impl<'a> Parser<'a> {
     if did_consume_app || did_consume_let {
       self.builder.start_node_at(checkpoint, Syntax::Expr.into());
       self.builder.finish_node();
-    };
+    };*/
   }
 
   fn whitespace(&mut self) {
-    if self.input.at(Syntax::Whitespaces) {
-      if let Some(span) = self.input.advance() {
-        self
-          .builder
-          .token(Syntax::Whitespaces.into(), &self.input.content[span]);
-      }
+    if !self.input.at(Syntax::Whitespaces) {
+      return;
     }
+    let Some(span) = self.input.advance() else {
+      return;
+    };
+    self
+      .builder
+      .token(Syntax::Whitespaces.into(), &self.input.content[span]);
   }
 
-  fn parse(mut self) -> (GreenNode, Vec<ParseError>) {
+  fn program(&mut self) {
     self.with(Syntax::Program, |this| {
-      this.expr(&bitset([Syntax::EndOfFile]));
+      this.whitespace();
+      this.expr(hashset![Syntax::EndOfFile]);
       if !this.input.at(Syntax::EndOfFile) {
-        let _ = this.recover_until(&BitSet::new(), vec![Syntax::EndOfFile]);
+        this.recover_until(hashset![], vec![Syntax::EndOfFile]);
       }
     });
-    (self.builder.finish(), self.errors)
   }
 }
 
 pub fn parse(input: &str) -> (GreenNode, Vec<ParseError>) {
-  Parser::new(input).parse()
+  let mut parser = Parser::new(input);
+  parser.program();
+  (parser.builder.finish(), parser.errors)
 }
 
 #[cfg(test)]
 mod tests {
   use rowan::SyntaxNode;
 
-use super::*;
+  use super::*;
 
   #[test]
   fn parsing_multiple_lets_and_multiple_apps() {
@@ -391,8 +388,8 @@ y (
     let (tree, _) = parse(input);
     let expect = expect_test::expect![[r#"
         Program@0..63
-          Expr@0..63
-            Whitespaces@0..1 "\n"
+          Whitespaces@0..1 "\n"
+          Expr@1..63
             Let@1..18
               LetKw@1..4 "let"
               Whitespaces@4..5 " "
@@ -513,8 +510,8 @@ x y
     let (tree, _) = parse(input);
     let expect = expect_test::expect![[r#"
         Program@0..34
-          Expr@0..34
-            Whitespaces@0..1 "\n"
+          Whitespaces@0..1 "\n"
+          Expr@1..34
             Let@1..20
               LetKw@1..4 "let"
               Whitespaces@4..5 " "
@@ -573,8 +570,8 @@ let x_y_2 = ( \ x ->
     let (tree, _) = parse(input);
     let expect = expect_test::expect![[r#"
         Program@0..79
-          Expr@0..79
-            Whitespaces@0..1 "\n"
+          Whitespaces@0..1 "\n"
+          Expr@1..79
             Let@1..61
               LetKw@1..4 "let"
               Whitespaces@4..5 " "
@@ -670,8 +667,8 @@ y a
     let (tree, _) = parse(input);
     let expect = expect_test::expect![[r#"
         Program@0..36
-          Expr@0..20
-            Whitespaces@0..1 "\n"
+          Whitespaces@0..1 "\n"
+          Expr@1..20
             Let@1..18
               LetKw@1..4 "let"
               Whitespaces@4..5 " "
@@ -724,8 +721,8 @@ a b
     let (tree, _) = parse(input);
     let expect = expect_test::expect![[r#"
         Program@0..34
-          Expr@0..34
-            Whitespaces@0..1 "\n"
+          Whitespaces@0..1 "\n"
+          Expr@1..34
             Let@1..19
               LetKw@1..4 "let"
               Whitespaces@4..5 " "
@@ -782,8 +779,8 @@ let a = (\x -> x);
     let (tree, _) = parse(input);
     let expect = expect_test::expect![[r#"
         Program@0..20
-          Expr@0..20
-            Whitespaces@0..1 "\n"
+          Whitespaces@0..1 "\n"
+          Expr@1..20
             Let@1..20
               LetKw@1..4 "let"
               Whitespaces@4..5 " "
@@ -823,6 +820,7 @@ let a = (\x -> x);
             App@0..4
               ParenthesizedExpr@0..3
                 LeftParen@0..1 "("
+                Expr@1..1
                 RightParen@1..2 ")"
                 Whitespaces@2..3 " "
               Var@3..4
@@ -844,8 +842,8 @@ apply (\x -> x)
     let (tree, errors) = parse(input);
     let expect = expect_test::expect![[r#"
         Program@0..72
-          Expr@0..72
-            Whitespaces@0..1 "\n"
+          Whitespaces@0..1 "\n"
+          Expr@1..72
             Let@1..38
               LetKw@1..4 "let"
               Whitespaces@4..5 " "

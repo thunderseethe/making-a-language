@@ -69,7 +69,7 @@ impl Desugar {
   }
 
   fn desugar_program(&mut self, cst: SyntaxNode<Lang>) -> Ast<String> {
-    let Some(expr) = cst.first_child() else {
+    let Some(expr) = cst.first_child_by_kind(&|kind| kind == Syntax::Expr) else {
       // Assume parser has emitted an error for the missing node and just return a Hole here.
       return self.hole(&cst);
     };

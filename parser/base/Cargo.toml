@@ -8,6 +8,6 @@ expect-test.workspace = true
 
 [dependencies]
 enum-iterator = "2.1.0"
-bit-set = "0.8.0"
+im.workspace = true
 logos = "0.15"
 rowan = "0.16"
