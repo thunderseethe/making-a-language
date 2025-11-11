@@ -35,14 +35,15 @@ impl AstBuilder {
     let body = body(vars);
     self.funs(vars, body)
   }
-    
-  pub fn funs<V, Vars>(&self, vars: Vars, body: Ast<V>) -> Ast<V> 
+
+  pub fn funs<V, Vars>(&self, vars: Vars, body: Ast<V>) -> Ast<V>
   where
     Vars: IntoIterator<Item = V>,
     Vars::IntoIter: DoubleEndedIterator,
   {
-    vars.into_iter()
-        .rfold(body, |body, var| Ast::fun(self.next_id(), var, body))
+    vars
+      .into_iter()
+      .rfold(body, |body, var| Ast::fun(self.next_id(), var, body))
   }
 
   pub fn fun<V>(&self, var: V, body: Ast<V>) -> Ast<V> {
@@ -50,7 +51,9 @@ impl AstBuilder {
   }
 
   pub fn apps<V>(&self, head: Ast<V>, args: impl IntoIterator<Item = Ast<V>>) -> Ast<V> {
-    args.into_iter().fold(head, |head, arg| Ast::app(self.next_id(), head, arg))
+    args
+      .into_iter()
+      .fold(head, |head, arg| Ast::app(self.next_id(), head, arg))
   }
 
   pub fn app<V>(&self, fun: Ast<V>, arg: Ast<V>) -> Ast<V> {
@@ -67,4 +70,3 @@ impl AstBuilder {
     })
   }
 }
-
