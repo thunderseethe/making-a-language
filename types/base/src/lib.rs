@@ -159,7 +159,7 @@ impl UnifyKey for TypeVar {
 /// Right now this is just type equality but it will be more substantial later
 #[derive(Debug)]
 enum Constraint {
-  // TODO: NodeId might be better represented by some kind of like provenance. Not sure yet.
+  // TODO: NodeId migAht be better represented by some kind of like provenance. Not sure yet.
   TypeEqual(Provenance, Type, Type),
 }
 
@@ -170,14 +170,14 @@ enum Provenance {
   // An application has an ast node in function position that does not have a function type.
   AppExpectedFun(NodeId),
   // Constraint produced by subsumption.
-  Subsumption(NodeId),
+  ExpectedUnify(NodeId),
 }
 impl Provenance {
   fn id(&self) -> NodeId {
     match self {
       Provenance::UnexpectedFun(node_id)
       | Provenance::AppExpectedFun(node_id)
-      | Provenance::Subsumption(node_id) => *node_id,
+      | Provenance::ExpectedUnify(node_id) => *node_id,
     }
   }
 }
@@ -188,11 +188,11 @@ impl Provenance {
 #[derive(Default)]
 struct TypeInference {
   unification_table: InPlaceUnificationTable<TypeVar>,
-  marks: std::collections::HashMap<NodeId, Mark>,
+  errors: std::collections::HashMap<NodeId, TypeError>,
 }
 
 #[derive(PartialEq, Eq, Debug, Clone)]
-pub enum Mark {
+pub enum TypeError {
   InfiniteType {
     type_var: TypeVar,
     ty: Type,
@@ -205,7 +205,7 @@ pub enum Mark {
     inferred_ty: Type,
     expected_fun_ty: Type,
   },
-  Subsumption {
+  ExpectedUnify {
     checked: Type,
     inferred: Type,
   },
@@ -329,7 +329,7 @@ impl TypeInference {
         let id = ast.id();
         let (mut out, actual_ty) = self.infer(env, ast);
         out.constraints.push(Constraint::TypeEqual(
-          Provenance::Subsumption(id),
+          Provenance::ExpectedUnify(id),
           expected_ty,
           actual_ty,
         ));
@@ -340,15 +340,9 @@ impl TypeInference {
 }
 
 #[derive(Debug, PartialEq, Eq, Clone)]
-pub enum TypeErrorKind {
+pub enum UnificationError {
   TypeNotEqual(Type, Type),
   InfiniteType(TypeVar, Type),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TypeError {
-  pub kind: TypeErrorKind,
-  pub node_id: NodeId,
 }
 
 fn occurs_check(var: TypeVar, ty: Type) -> Result<(), Type> {
@@ -376,34 +370,34 @@ impl TypeInference {
         Constraint::TypeEqual(provenance, left, right) => {
           if let Err(kind) = self.unify_ty_ty(left, right) {
             let (node_id, mark) = match kind {
-              TypeErrorKind::InfiniteType(type_var, ty) => {
-                (provenance.id(), Mark::InfiniteType { type_var, ty })
+              UnificationError::InfiniteType(type_var, ty) => {
+                (provenance.id(), TypeError::InfiniteType { type_var, ty })
               }
-              TypeErrorKind::TypeNotEqual(left, right) => match provenance {
+              UnificationError::TypeNotEqual(left, right) => match provenance {
                 Provenance::UnexpectedFun(node_id) => (
                   node_id,
-                  Mark::UnexpectedFun {
+                  TypeError::UnexpectedFun {
                     expected_ty: left,
                     fun_ty: right,
                   },
                 ),
                 Provenance::AppExpectedFun(node_id) => (
                   node_id,
-                  Mark::AppExpectedFun {
+                  TypeError::AppExpectedFun {
                     inferred_ty: left,
                     expected_fun_ty: right,
                   },
                 ),
-                Provenance::Subsumption(node_id) => (
+                Provenance::ExpectedUnify(node_id) => (
                   node_id,
-                  Mark::Subsumption {
+                  TypeError::ExpectedUnify {
                     checked: left,
                     inferred: right,
                   },
                 ),
               },
             };
-            self.marks.insert(node_id, mark);
+            self.errors.insert(node_id, mark);
           }
         }
       }
@@ -425,7 +419,7 @@ impl TypeInference {
     }
   }
 
-  fn unify_ty_ty(&mut self, unnorm_left: Type, unnorm_right: Type) -> Result<(), TypeErrorKind> {
+  fn unify_ty_ty(&mut self, unnorm_left: Type, unnorm_right: Type) -> Result<(), UnificationError> {
     let left = self.normalize_ty(unnorm_left);
     let right = self.normalize_ty(unnorm_right);
     match (left, right) {
@@ -434,15 +428,15 @@ impl TypeInference {
         self
           .unify_ty_ty(*a_arg.clone(), *b_arg.clone())
           .map_err(|kind| match kind {
-            TypeErrorKind::TypeNotEqual(a_arg, b_arg) => TypeErrorKind::TypeNotEqual(
+            UnificationError::TypeNotEqual(a_arg, b_arg) => UnificationError::TypeNotEqual(
               Type::fun(a_arg, *a_ret.clone()),
               Type::fun(b_arg, *b_ret.clone()),
             ),
             kind => kind,
           })?;
         self.unify_ty_ty(*a_ret, *b_ret).map_err(|kind| match kind {
-          TypeErrorKind::TypeNotEqual(a_ret, b_ret) => {
-            TypeErrorKind::TypeNotEqual(Type::fun(*a_arg, a_ret), Type::fun(*b_arg, b_ret))
+          UnificationError::TypeNotEqual(a_ret, b_ret) => {
+            UnificationError::TypeNotEqual(Type::fun(*a_arg, a_ret), Type::fun(*b_arg, b_ret))
           }
           kind => kind,
         })
@@ -450,16 +444,16 @@ impl TypeInference {
       (Type::Var(a), Type::Var(b)) => self
         .unification_table
         .unify_var_var(a, b)
-        .map_err(|(l, r)| TypeErrorKind::TypeNotEqual(l, r)),
+        .map_err(|(l, r)| UnificationError::TypeNotEqual(l, r)),
       (Type::Var(v), ty) | (ty, Type::Var(v)) => {
         ty.occurs_check(v)
-          .map_err(|ty| TypeErrorKind::InfiniteType(v, ty))?;
+          .map_err(|ty| UnificationError::InfiniteType(v, ty))?;
         self
           .unification_table
           .unify_var_value(v, Some(ty))
-          .map_err(|(l, r)| TypeErrorKind::TypeNotEqual(l, r))
+          .map_err(|(l, r)| UnificationError::TypeNotEqual(l, r))
       }
-      (left, right) => Err(TypeErrorKind::TypeNotEqual(left, right)),
+      (left, right) => Err(UnificationError::TypeNotEqual(left, right)),
     }
   }
 }
@@ -527,13 +521,13 @@ pub struct TypeScheme {
 pub struct TypeInferOut {
   pub ast: Ast<TypedVar>,
   pub scheme: TypeScheme,
-  pub errors: std::collections::HashMap<NodeId, Mark>,
+  pub errors: std::collections::HashMap<NodeId, TypeError>,
 }
 
 pub fn type_infer(ast: Ast<Var>) -> TypeInferOut {
   let mut ctx = TypeInference {
     unification_table: InPlaceUnificationTable::default(),
-    marks: Default::default(),
+    errors: Default::default(),
   };
 
   // Constraint generation
@@ -551,7 +545,7 @@ pub fn type_infer(ast: Ast<Var>) -> TypeInferOut {
   TypeInferOut {
     ast: typed_ast,
     scheme: TypeScheme { unbound, ty },
-    errors: ctx.marks,
+    errors: ctx.errors,
   }
 }
 
@@ -666,7 +660,7 @@ mod tests {
 
     assert_eq!(
       ty_chk.errors[&NodeId(0)],
-      Mark::Subsumption {
+      TypeError::ExpectedUnify {
         checked: Type::fun(Type::Int, Type::Var(TypeVar(2))),
         inferred: Type::Int
       }
@@ -688,7 +682,7 @@ mod tests {
     let b = TypeVar(10);
     assert_eq!(
       ty_chk.errors[&NodeId(6)],
-      Mark::AppExpectedFun {
+      TypeError::AppExpectedFun {
         inferred_ty: Type::Int,
         expected_fun_ty: Type::fun(Type::Var(a), Type::Var(b))
       },

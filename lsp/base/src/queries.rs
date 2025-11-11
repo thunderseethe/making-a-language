@@ -21,7 +21,7 @@ use tower_lsp_server::lsp_types::{
   CompletionItem, CompletionItemKind, CompletionResponse, Diagnostic, Hover, HoverContents, LSPAny,
   LanguageString, Location, MarkedString, Position, Range as LspRange, Uri,
 };
-use types_base::{Ast, Mark, NodeId, Type, TypeScheme, TypedVar, Var};
+use types_base::{Ast, TypeError, NodeId, Type, TypeScheme, TypedVar, Var};
 
 use self::graph::DepGraph;
 use self::prettyprint::{PrettyprintType, prettyprint_ty};
@@ -142,7 +142,7 @@ pub struct PellucidDesugarError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PellucidTypeError {
   pub node: NodeId,
-  pub mark: Mark,
+  pub mark: TypeError,
 }
 
 #[derive(Default, Debug)]
@@ -903,12 +903,12 @@ impl QueryContext {
           Diagnostic::new_simple(
             range,
             match types.mark {
-              Mark::InfiniteType { type_var, ty } => format!(
+              TypeError::InfiniteType { type_var, ty } => format!(
                 "types: Tried to solve variable {} to infinite type {}",
                 prettyprint_ty(&Type::Var(type_var)),
                 prettyprint_ty(&ty)
               ),
-              Mark::UnexpectedFun {
+              TypeError::UnexpectedFun {
                 expected_ty,
                 fun_ty,
               } => format!(
@@ -916,7 +916,7 @@ impl QueryContext {
                 prettyprint_ty(&expected_ty),
                 prettyprint_ty(&fun_ty)
               ),
-              Mark::AppExpectedFun {
+              TypeError::AppExpectedFun {
                 inferred_ty,
                 expected_fun_ty,
               } => format!(
@@ -924,7 +924,7 @@ impl QueryContext {
                 prettyprint_ty(&expected_fun_ty),
                 prettyprint_ty(&inferred_ty)
               ),
-              Mark::Subsumption { checked, inferred } => format!(
+              TypeError::ExpectedUnifyfy { checked, inferred } => format!(
                 "types: Tried to check this as type {} but it's inferred to have type {}",
                 prettyprint_ty(&checked),
                 prettyprint_ty(&inferred)

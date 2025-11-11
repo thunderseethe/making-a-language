@@ -3,7 +3,7 @@ use std::ops::{ControlFlow, Range};
 
 use enum_iterator::{Sequence, all};
 use im::{HashSet, hashset};
-use logos::{Logos, SpannedIter};
+use logos::Logos;
 pub use rowan;
 use rowan::{GreenNode, GreenNodeBuilder, SyntaxKind};
 
@@ -17,16 +17,14 @@ pub enum Syntax {
   LeftParen = 0,
   #[token(")")]
   RightParen,
-  #[token("\\")]
-  Backslash,
+  #[token("|")]
+  VerticalBar,
   #[token("=")]
   Equal,
-  #[token("->")]
-  Arrow,
-  #[token("let")]
-  LetKw,
   #[token(";")]
   Semicolon,
+  #[token("let")]
+  LetKw,
   #[regex("[\\p{alpha}_]\\w*")]
   Identifier,
   #[regex("\\d+")]
@@ -56,7 +54,7 @@ pub fn all_syntax() -> impl Iterator<Item = Syntax> {
 
 struct Input<'a> {
   content: &'a str,
-  lexer: Peekable<SpannedIter<'a, Syntax>>,
+  lexer: Peekable<logos::SpannedIter<'a, Syntax>>,
 }
 
 impl<'a> Input<'a> {
@@ -138,6 +136,7 @@ struct Parser<'a> {
   errors: Vec<ParseError>,
   in_error: bool,
 }
+
 impl<'a> Parser<'a> {
   fn new(content: &'a str) -> Self {
     Self {
@@ -202,8 +201,7 @@ impl<'a> Parser<'a> {
         expected,
         span: err_span,
       });
-    }
-    
+    }  
   }
 
   fn ate(&mut self, token: Syntax) -> ControlFlow<()> {
@@ -218,7 +216,7 @@ impl<'a> Parser<'a> {
     ControlFlow::Break(())
   }
 
-  fn expect(&mut self, token: Syntax, mut anchor: HashSet<Syntax>) {
+  fn expect(&mut self, token: Syntax, mut anchor_set: HashSet<Syntax>) {
     // Happy path
     let ControlFlow::Continue(_) = self.ate(token) else {
       // If `ate` returns break, it consumed the expected token and we are done.
@@ -226,8 +224,8 @@ impl<'a> Parser<'a> {
     };
     // Otherwise, start error recovery
     // We can always recover to our expected token, so ensure it's in the anchor set.
-    anchor.insert(token);
-    self.recover_until(anchor, vec![token]);
+    anchor_set.insert(token);
+    self.recover_until(anchor_set, vec![token]);
     // We might have recovered to our expected token in which case we want to consume it to get
     // us back on track. We don't want to recurse, because that might not terminate, so we just
     // encode a singularly secondary check.
@@ -249,13 +247,13 @@ impl<'a> Parser<'a> {
           this.expect(Syntax::RightParen, anchor);
         });
       }
-      Syntax::Backslash => {
+      Syntax::VerticalBar => {
         self.with(Syntax::Fun, |this| {
-          this.expect(Syntax::Backslash, anchor.clone());
+          this.expect(Syntax::VerticalBar, anchor.clone());
           this.with(Syntax::FunBinder, |this| {
             this.expect(Syntax::Identifier, anchor.clone())
           });
-          this.expect(Syntax::Arrow, anchor.clone());
+          this.expect(Syntax::VerticalBar, anchor.clone());
           this.expr(anchor);
         });
       }
@@ -306,37 +304,18 @@ impl<'a> Parser<'a> {
         )
       });
       this.expect(Syntax::Equal, unioning(&anchor, [Syntax::Semicolon]));
-      this.expr(unioning(&anchor, [Syntax::Semicolon, Syntax::LetKw]));
-      this.expect(Syntax::Semicolon, unioning(&anchor, [Syntax::LetKw]));
+      this.expr(unioning(&anchor, [Syntax::Semicolon]));
+      this.expect(Syntax::Semicolon, anchor.clone());
     })
   }
 
   fn expr(&mut self, anchor: HashSet<Syntax>) {
     self.with(Syntax::Expr, |this| {
       while this.input.at(Syntax::LetKw) {
-        this.let_(anchor.clone());
+        this.let_(unioning(&anchor, [Syntax::LetKw]));
       }
       this.app(anchor);
     });
-    //let checkpoint = self.builder.checkpoint();
-
-    /*
-    // If we consumed anything, even an error, wrap as an expression
-    let mut did_consume_let = false;
-    self.whitespace();
-    while self.input.at(Syntax::LetKw) {
-      did_consume_let = true;
-      self.let_(anchor.clone());
-    }
-
-    let did_consume_app = matches!(self.app(anchor), ControlFlow::Continue(()));
-
-    // Only produce an expr node if we parsed something.
-    // This helps keep the CST cleaner which is helpful when we consume it downstream.
-    if did_consume_app || did_consume_let {
-      self.builder.start_node_at(checkpoint, Syntax::Expr.into());
-      self.builder.finish_node();
-    };*/
   }
 
   fn whitespace(&mut self) {
@@ -377,20 +356,20 @@ mod tests {
   #[test]
   fn parsing_multiple_lets_and_multiple_apps() {
     let input = r#"
-let x = \a -> a;
-let y = \ 
-  b -> x b;
+let x = |a| a;
+let y = |
+  b| x b;
 y (
-  \c -> c
+  |c| c
    ) 
 4
 "#;
     let (tree, _) = parse(input);
     let expect = expect_test::expect![[r#"
-        Program@0..63
+        Program@0..56
           Whitespaces@0..1 "\n"
-          Expr@1..63
-            Let@1..18
+          Expr@1..56
+            Let@1..16
               LetKw@1..4 "let"
               Whitespaces@4..5 " "
               LetBinder@5..7
@@ -398,70 +377,67 @@ y (
                 Whitespaces@6..7 " "
               Equal@7..8 "="
               Whitespaces@8..9 " "
-              Expr@9..16
-                Fun@9..16
-                  Backslash@9..10 "\\"
-                  FunBinder@10..12
+              Expr@9..14
+                Fun@9..14
+                  VerticalBar@9..10 "|"
+                  FunBinder@10..11
                     Identifier@10..11 "a"
-                    Whitespaces@11..12 " "
-                  Arrow@12..14 "->"
-                  Whitespaces@14..15 " "
-                  Expr@15..16
-                    Var@15..16
-                      Identifier@15..16 "a"
-              Semicolon@16..17 ";"
-              Whitespaces@17..18 "\n"
-            Let@18..41
-              LetKw@18..21 "let"
-              Whitespaces@21..22 " "
-              LetBinder@22..24
-                Identifier@22..23 "y"
-                Whitespaces@23..24 " "
-              Equal@24..25 "="
-              Whitespaces@25..26 " "
-              Expr@26..39
-                Fun@26..39
-                  Backslash@26..27 "\\"
-                  Whitespaces@27..31 " \n  "
-                  FunBinder@31..33
-                    Identifier@31..32 "b"
-                    Whitespaces@32..33 " "
-                  Arrow@33..35 "->"
-                  Whitespaces@35..36 " "
-                  Expr@36..39
-                    App@36..39
-                      Var@36..38
-                        Identifier@36..37 "x"
-                        Whitespaces@37..38 " "
-                      Var@38..39
-                        Identifier@38..39 "b"
-              Semicolon@39..40 ";"
-              Whitespaces@40..41 "\n"
-            App@41..63
-              App@41..61
-                Var@41..43
-                  Identifier@41..42 "y"
-                  Whitespaces@42..43 " "
-                ParenthesizedExpr@43..61
-                  LeftParen@43..44 "("
-                  Whitespaces@44..47 "\n  "
-                  Expr@47..58
-                    Fun@47..58
-                      Backslash@47..48 "\\"
-                      FunBinder@48..50
-                        Identifier@48..49 "c"
-                        Whitespaces@49..50 " "
-                      Arrow@50..52 "->"
-                      Whitespaces@52..53 " "
-                      Expr@53..58
-                        Var@53..58
-                          Identifier@53..54 "c"
-                          Whitespaces@54..58 "\n   "
-                  RightParen@58..59 ")"
-                  Whitespaces@59..61 " \n"
-              IntegerExpr@61..63
-                Int@61..62 "4"
-                Whitespaces@62..63 "\n"
+                  VerticalBar@11..12 "|"
+                  Whitespaces@12..13 " "
+                  Expr@13..14
+                    Var@13..14
+                      Identifier@13..14 "a"
+              Semicolon@14..15 ";"
+              Whitespaces@15..16 "\n"
+            Let@16..36
+              LetKw@16..19 "let"
+              Whitespaces@19..20 " "
+              LetBinder@20..22
+                Identifier@20..21 "y"
+                Whitespaces@21..22 " "
+              Equal@22..23 "="
+              Whitespaces@23..24 " "
+              Expr@24..34
+                Fun@24..34
+                  VerticalBar@24..25 "|"
+                  Whitespaces@25..28 "\n  "
+                  FunBinder@28..29
+                    Identifier@28..29 "b"
+                  VerticalBar@29..30 "|"
+                  Whitespaces@30..31 " "
+                  Expr@31..34
+                    App@31..34
+                      Var@31..33
+                        Identifier@31..32 "x"
+                        Whitespaces@32..33 " "
+                      Var@33..34
+                        Identifier@33..34 "b"
+              Semicolon@34..35 ";"
+              Whitespaces@35..36 "\n"
+            App@36..56
+              App@36..54
+                Var@36..38
+                  Identifier@36..37 "y"
+                  Whitespaces@37..38 " "
+                ParenthesizedExpr@38..54
+                  LeftParen@38..39 "("
+                  Whitespaces@39..42 "\n  "
+                  Expr@42..51
+                    Fun@42..51
+                      VerticalBar@42..43 "|"
+                      FunBinder@43..44
+                        Identifier@43..44 "c"
+                      VerticalBar@44..45 "|"
+                      Whitespaces@45..46 " "
+                      Expr@46..51
+                        Var@46..51
+                          Identifier@46..47 "c"
+                          Whitespaces@47..51 "\n   "
+                  RightParen@51..52 ")"
+                  Whitespaces@52..54 " \n"
+              IntegerExpr@54..56
+                Int@54..55 "4"
+                Whitespaces@55..56 "\n"
     "#]];
     expect.assert_eq(&format!("{:#?}", SyntaxNode::<Lang>::new_root(tree)));
   }
@@ -503,16 +479,16 @@ y (
   #[test]
   fn parse_invalid_let() {
     let input = r#"
-let x = \a -> a ->
+let x = |a| a |
 let y = 3
 x y
 "#;
     let (tree, _) = parse(input);
     let expect = expect_test::expect![[r#"
-        Program@0..34
+        Program@0..31
           Whitespaces@0..1 "\n"
-          Expr@1..34
-            Let@1..20
+          Expr@1..31
+            Let@1..31
               LetKw@1..4 "let"
               Whitespaces@4..5 " "
               LetBinder@5..7
@@ -520,41 +496,43 @@ x y
                 Whitespaces@6..7 " "
               Equal@7..8 "="
               Whitespaces@8..9 " "
-              Expr@9..17
-                Fun@9..17
-                  Backslash@9..10 "\\"
-                  FunBinder@10..12
+              Expr@9..31
+                Fun@9..31
+                  VerticalBar@9..10 "|"
+                  FunBinder@10..11
                     Identifier@10..11 "a"
-                    Whitespaces@11..12 " "
-                  Arrow@12..14 "->"
-                  Whitespaces@14..15 " "
-                  Expr@15..17
-                    Var@15..17
-                      Identifier@15..16 "a"
-                      Whitespaces@16..17 " "
-              Error@17..20
-                Arrow@17..19 "->"
-                Whitespaces@19..20 "\n"
-            Let@20..34
-              LetKw@20..23 "let"
-              Whitespaces@23..24 " "
-              LetBinder@24..26
-                Identifier@24..25 "y"
-                Whitespaces@25..26 " "
-              Equal@26..27 "="
-              Whitespaces@27..28 " "
-              Expr@28..34
-                App@28..34
-                  App@28..32
-                    IntegerExpr@28..30
-                      Int@28..29 "3"
-                      Whitespaces@29..30 "\n"
-                    Var@30..32
-                      Identifier@30..31 "x"
-                      Whitespaces@31..32 " "
-                  Var@32..34
-                    Identifier@32..33 "y"
-                    Whitespaces@33..34 "\n"
+                  VerticalBar@11..12 "|"
+                  Whitespaces@12..13 " "
+                  Expr@13..31
+                    App@13..31
+                      Var@13..15
+                        Identifier@13..14 "a"
+                        Whitespaces@14..15 " "
+                      Fun@15..31
+                        VerticalBar@15..16 "|"
+                        Whitespaces@16..17 "\n"
+                        FunBinder@17..17
+                        Expr@17..31
+                          Let@17..31
+                            LetKw@17..20 "let"
+                            Whitespaces@20..21 " "
+                            LetBinder@21..23
+                              Identifier@21..22 "y"
+                              Whitespaces@22..23 " "
+                            Equal@23..24 "="
+                            Whitespaces@24..25 " "
+                            Expr@25..31
+                              App@25..31
+                                App@25..29
+                                  IntegerExpr@25..27
+                                    Int@25..26 "3"
+                                    Whitespaces@26..27 "\n"
+                                  Var@27..29
+                                    Identifier@27..28 "x"
+                                    Whitespaces@28..29 " "
+                                Var@29..31
+                                  Identifier@29..30 "y"
+                                  Whitespaces@30..31 "\n"
     "#]];
     expect.assert_eq(&format!("{:#?}", SyntaxNode::<Lang>::new_root(tree)));
   }
@@ -562,17 +540,17 @@ x y
   #[test]
   fn parse_invalid() {
     let input = r#"
-let x_y_2 = ( \ x -> 
-    \ y -> x) 2 (\z test_id -> z)
+let x_y_2 = ( | x |
+    | y | x) 2 (|z test_id | z)
   ;
-( \ x -> x) x_y_2
+( | x | x) x_y_2
 "#;
     let (tree, _) = parse(input);
     let expect = expect_test::expect![[r#"
-        Program@0..79
+        Program@0..74
           Whitespaces@0..1 "\n"
-          Expr@1..79
-            Let@1..61
+          Expr@1..74
+            Let@1..57
               LetKw@1..4 "let"
               Whitespaces@4..5 " "
               LetBinder@5..11
@@ -580,79 +558,79 @@ let x_y_2 = ( \ x ->
                 Whitespaces@10..11 " "
               Equal@11..12 "="
               Whitespaces@12..13 " "
-              Expr@13..59
-                App@13..59
-                  App@13..39
-                    ParenthesizedExpr@13..37
+              Expr@13..55
+                App@13..55
+                  App@13..36
+                    ParenthesizedExpr@13..34
                       LeftParen@13..14 "("
                       Whitespaces@14..15 " "
-                      Expr@15..35
-                        Fun@15..35
-                          Backslash@15..16 "\\"
+                      Expr@15..32
+                        Fun@15..32
+                          VerticalBar@15..16 "|"
                           Whitespaces@16..17 " "
                           FunBinder@17..19
                             Identifier@17..18 "x"
                             Whitespaces@18..19 " "
-                          Arrow@19..21 "->"
-                          Whitespaces@21..27 " \n    "
-                          Expr@27..35
-                            Fun@27..35
-                              Backslash@27..28 "\\"
-                              Whitespaces@28..29 " "
-                              FunBinder@29..31
-                                Identifier@29..30 "y"
-                                Whitespaces@30..31 " "
-                              Arrow@31..33 "->"
-                              Whitespaces@33..34 " "
-                              Expr@34..35
-                                Var@34..35
-                                  Identifier@34..35 "x"
-                      RightParen@35..36 ")"
-                      Whitespaces@36..37 " "
-                    IntegerExpr@37..39
-                      Int@37..38 "2"
-                      Whitespaces@38..39 " "
-                  ParenthesizedExpr@39..59
-                    LeftParen@39..40 "("
-                    Expr@40..55
-                      Fun@40..55
-                        Backslash@40..41 "\\"
-                        FunBinder@41..43
-                          Identifier@41..42 "z"
-                          Whitespaces@42..43 " "
-                        Error@43..51
-                          Identifier@43..50 "test_id"
-                          Whitespaces@50..51 " "
-                        Arrow@51..53 "->"
-                        Whitespaces@53..54 " "
-                        Expr@54..55
-                          Var@54..55
-                            Identifier@54..55 "z"
-                    RightParen@55..56 ")"
-                    Whitespaces@56..59 "\n  "
-              Semicolon@59..60 ";"
-              Whitespaces@60..61 "\n"
-            App@61..79
-              ParenthesizedExpr@61..73
-                LeftParen@61..62 "("
-                Whitespaces@62..63 " "
-                Expr@63..71
-                  Fun@63..71
-                    Backslash@63..64 "\\"
+                          VerticalBar@19..20 "|"
+                          Whitespaces@20..25 "\n    "
+                          Expr@25..32
+                            Fun@25..32
+                              VerticalBar@25..26 "|"
+                              Whitespaces@26..27 " "
+                              FunBinder@27..29
+                                Identifier@27..28 "y"
+                                Whitespaces@28..29 " "
+                              VerticalBar@29..30 "|"
+                              Whitespaces@30..31 " "
+                              Expr@31..32
+                                Var@31..32
+                                  Identifier@31..32 "x"
+                      RightParen@32..33 ")"
+                      Whitespaces@33..34 " "
+                    IntegerExpr@34..36
+                      Int@34..35 "2"
+                      Whitespaces@35..36 " "
+                  ParenthesizedExpr@36..55
+                    LeftParen@36..37 "("
+                    Expr@37..51
+                      Fun@37..51
+                        VerticalBar@37..38 "|"
+                        FunBinder@38..40
+                          Identifier@38..39 "z"
+                          Whitespaces@39..40 " "
+                        Error@40..48
+                          Identifier@40..47 "test_id"
+                          Whitespaces@47..48 " "
+                        VerticalBar@48..49 "|"
+                        Whitespaces@49..50 " "
+                        Expr@50..51
+                          Var@50..51
+                            Identifier@50..51 "z"
+                    RightParen@51..52 ")"
+                    Whitespaces@52..55 "\n  "
+              Semicolon@55..56 ";"
+              Whitespaces@56..57 "\n"
+            App@57..74
+              ParenthesizedExpr@57..68
+                LeftParen@57..58 "("
+                Whitespaces@58..59 " "
+                Expr@59..66
+                  Fun@59..66
+                    VerticalBar@59..60 "|"
+                    Whitespaces@60..61 " "
+                    FunBinder@61..63
+                      Identifier@61..62 "x"
+                      Whitespaces@62..63 " "
+                    VerticalBar@63..64 "|"
                     Whitespaces@64..65 " "
-                    FunBinder@65..67
-                      Identifier@65..66 "x"
-                      Whitespaces@66..67 " "
-                    Arrow@67..69 "->"
-                    Whitespaces@69..70 " "
-                    Expr@70..71
-                      Var@70..71
-                        Identifier@70..71 "x"
-                RightParen@71..72 ")"
-                Whitespaces@72..73 " "
-              Var@73..79
-                Identifier@73..78 "x_y_2"
-                Whitespaces@78..79 "\n"
+                    Expr@65..66
+                      Var@65..66
+                        Identifier@65..66 "x"
+                RightParen@66..67 ")"
+                Whitespaces@67..68 " "
+              Var@68..74
+                Identifier@68..73 "x_y_2"
+                Whitespaces@73..74 "\n"
     "#]];
     expect.assert_eq(&format!("{:#?}", SyntaxNode::<Lang>::new_root(tree)));
   }
@@ -660,16 +638,16 @@ let x_y_2 = ( \ x ->
   #[test]
   fn parse_let_in_invalid_position() {
     let input = r#"
-let y = \x -> x;
+let y = |x| x;
 y let a = 1;
 y a 
 "#;
     let (tree, _) = parse(input);
     let expect = expect_test::expect![[r#"
-        Program@0..36
+        Program@0..34
           Whitespaces@0..1 "\n"
-          Expr@1..20
-            Let@1..18
+          Expr@1..18
+            Let@1..16
               LetKw@1..4 "let"
               Whitespaces@4..5 " "
               LetBinder@5..7
@@ -677,36 +655,35 @@ y a
                 Whitespaces@6..7 " "
               Equal@7..8 "="
               Whitespaces@8..9 " "
-              Expr@9..16
-                Fun@9..16
-                  Backslash@9..10 "\\"
-                  FunBinder@10..12
+              Expr@9..14
+                Fun@9..14
+                  VerticalBar@9..10 "|"
+                  FunBinder@10..11
                     Identifier@10..11 "x"
-                    Whitespaces@11..12 " "
-                  Arrow@12..14 "->"
-                  Whitespaces@14..15 " "
-                  Expr@15..16
-                    Var@15..16
-                      Identifier@15..16 "x"
-              Semicolon@16..17 ";"
-              Whitespaces@17..18 "\n"
-            Var@18..20
-              Identifier@18..19 "y"
-              Whitespaces@19..20 " "
-          Error@20..36
-            LetKw@20..23 "let"
+                  VerticalBar@11..12 "|"
+                  Whitespaces@12..13 " "
+                  Expr@13..14
+                    Var@13..14
+                      Identifier@13..14 "x"
+              Semicolon@14..15 ";"
+              Whitespaces@15..16 "\n"
+            Var@16..18
+              Identifier@16..17 "y"
+              Whitespaces@17..18 " "
+          Error@18..34
+            LetKw@18..21 "let"
+            Whitespaces@21..22 " "
+            Identifier@22..23 "a"
             Whitespaces@23..24 " "
-            Identifier@24..25 "a"
+            Equal@24..25 "="
             Whitespaces@25..26 " "
-            Equal@26..27 "="
-            Whitespaces@27..28 " "
-            Int@28..29 "1"
-            Semicolon@29..30 ";"
-            Whitespaces@30..31 "\n"
-            Identifier@31..32 "y"
-            Whitespaces@32..33 " "
-            Identifier@33..34 "a"
-            Whitespaces@34..36 " \n"
+            Int@26..27 "1"
+            Semicolon@27..28 ";"
+            Whitespaces@28..29 "\n"
+            Identifier@29..30 "y"
+            Whitespaces@30..31 " "
+            Identifier@31..32 "a"
+            Whitespaces@32..34 " \n"
     "#]];
     expect.assert_eq(&format!("{:#?}", SyntaxNode::<Lang>::new_root(tree)));
   }
@@ -714,16 +691,16 @@ y a
   #[test]
   fn parse_recovers_from_missing_semi() {
     let input = r#"
-let a = (\x -> x)
+let a = (|x| x)
 let b = 3;
 a b
 "#;
     let (tree, _) = parse(input);
     let expect = expect_test::expect![[r#"
-        Program@0..34
+        Program@0..32
           Whitespaces@0..1 "\n"
-          Expr@1..34
-            Let@1..19
+          Expr@1..32
+            Let@1..17
               LetKw@1..4 "let"
               Whitespaces@4..5 " "
               LetBinder@5..7
@@ -731,42 +708,41 @@ a b
                 Whitespaces@6..7 " "
               Equal@7..8 "="
               Whitespaces@8..9 " "
-              Expr@9..19
-                ParenthesizedExpr@9..19
+              Expr@9..17
+                ParenthesizedExpr@9..17
                   LeftParen@9..10 "("
-                  Expr@10..17
-                    Fun@10..17
-                      Backslash@10..11 "\\"
-                      FunBinder@11..13
+                  Expr@10..15
+                    Fun@10..15
+                      VerticalBar@10..11 "|"
+                      FunBinder@11..12
                         Identifier@11..12 "x"
-                        Whitespaces@12..13 " "
-                      Arrow@13..15 "->"
-                      Whitespaces@15..16 " "
-                      Expr@16..17
-                        Var@16..17
-                          Identifier@16..17 "x"
-                  RightParen@17..18 ")"
-                  Whitespaces@18..19 "\n"
-            Let@19..30
-              LetKw@19..22 "let"
-              Whitespaces@22..23 " "
-              LetBinder@23..25
-                Identifier@23..24 "b"
-                Whitespaces@24..25 " "
-              Equal@25..26 "="
-              Whitespaces@26..27 " "
-              Expr@27..28
-                IntegerExpr@27..28
-                  Int@27..28 "3"
-              Semicolon@28..29 ";"
-              Whitespaces@29..30 "\n"
-            App@30..34
+                      VerticalBar@12..13 "|"
+                      Whitespaces@13..14 " "
+                      Expr@14..15
+                        Var@14..15
+                          Identifier@14..15 "x"
+                  RightParen@15..16 ")"
+                  Whitespaces@16..17 "\n"
+            Let@17..28
+              LetKw@17..20 "let"
+              Whitespaces@20..21 " "
+              LetBinder@21..23
+                Identifier@21..22 "b"
+                Whitespaces@22..23 " "
+              Equal@23..24 "="
+              Whitespaces@24..25 " "
+              Expr@25..26
+                IntegerExpr@25..26
+                  Int@25..26 "3"
+              Semicolon@26..27 ";"
+              Whitespaces@27..28 "\n"
+            App@28..32
+              Var@28..30
+                Identifier@28..29 "a"
+                Whitespaces@29..30 " "
               Var@30..32
-                Identifier@30..31 "a"
-                Whitespaces@31..32 " "
-              Var@32..34
-                Identifier@32..33 "b"
-                Whitespaces@33..34 "\n"
+                Identifier@30..31 "b"
+                Whitespaces@31..32 "\n"
     "#]];
     expect.assert_eq(&format!("{:#?}", SyntaxNode::<Lang>::new_root(tree)));
   }
@@ -774,14 +750,14 @@ a b
   #[test]
   fn parse_test_missing_expr_after_let() {
     let input = r#"
-let a = (\x -> x);
+let a = (|x| x);
 "#;
     let (tree, _) = parse(input);
     let expect = expect_test::expect![[r#"
-        Program@0..20
+        Program@0..18
           Whitespaces@0..1 "\n"
-          Expr@1..20
-            Let@1..20
+          Expr@1..18
+            Let@1..18
               LetKw@1..4 "let"
               Whitespaces@4..5 " "
               LetBinder@5..7
@@ -789,23 +765,22 @@ let a = (\x -> x);
                 Whitespaces@6..7 " "
               Equal@7..8 "="
               Whitespaces@8..9 " "
-              Expr@9..18
-                ParenthesizedExpr@9..18
+              Expr@9..16
+                ParenthesizedExpr@9..16
                   LeftParen@9..10 "("
-                  Expr@10..17
-                    Fun@10..17
-                      Backslash@10..11 "\\"
-                      FunBinder@11..13
+                  Expr@10..15
+                    Fun@10..15
+                      VerticalBar@10..11 "|"
+                      FunBinder@11..12
                         Identifier@11..12 "x"
-                        Whitespaces@12..13 " "
-                      Arrow@13..15 "->"
-                      Whitespaces@15..16 " "
-                      Expr@16..17
-                        Var@16..17
-                          Identifier@16..17 "x"
-                  RightParen@17..18 ")"
-              Semicolon@18..19 ";"
-              Whitespaces@19..20 "\n"
+                      VerticalBar@12..13 "|"
+                      Whitespaces@13..14 " "
+                      Expr@14..15
+                        Var@14..15
+                          Identifier@14..15 "x"
+                  RightParen@15..16 ")"
+              Semicolon@16..17 ";"
+              Whitespaces@17..18 "\n"
     "#]];
     expect.assert_eq(&format!("{:#?}", SyntaxNode::<Lang>::new_root(tree)));
   }
@@ -835,16 +810,16 @@ let a = (\x -> x);
   #[test]
   fn parse_test_recover_within_let_defn() {
     let input = r#"
-let apply = \fun -> \arg -> fun arg;
+let apply = |fun||arg| fun arg;
 let z = apply = ;
-apply (\x -> x)
+apply (|x| x)
 "#;
     let (tree, errors) = parse(input);
     let expect = expect_test::expect![[r#"
-        Program@0..72
+        Program@0..65
           Whitespaces@0..1 "\n"
-          Expr@1..72
-            Let@1..38
+          Expr@1..65
+            Let@1..33
               LetKw@1..4 "let"
               Whitespaces@4..5 " "
               LetBinder@5..11
@@ -852,73 +827,69 @@ apply (\x -> x)
                 Whitespaces@10..11 " "
               Equal@11..12 "="
               Whitespaces@12..13 " "
-              Expr@13..36
-                Fun@13..36
-                  Backslash@13..14 "\\"
-                  FunBinder@14..18
+              Expr@13..31
+                Fun@13..31
+                  VerticalBar@13..14 "|"
+                  FunBinder@14..17
                     Identifier@14..17 "fun"
-                    Whitespaces@17..18 " "
-                  Arrow@18..20 "->"
-                  Whitespaces@20..21 " "
-                  Expr@21..36
-                    Fun@21..36
-                      Backslash@21..22 "\\"
-                      FunBinder@22..26
-                        Identifier@22..25 "arg"
-                        Whitespaces@25..26 " "
-                      Arrow@26..28 "->"
-                      Whitespaces@28..29 " "
-                      Expr@29..36
-                        App@29..36
-                          Var@29..33
-                            Identifier@29..32 "fun"
-                            Whitespaces@32..33 " "
-                          Var@33..36
-                            Identifier@33..36 "arg"
-              Semicolon@36..37 ";"
-              Whitespaces@37..38 "\n"
-            Let@38..56
-              LetKw@38..41 "let"
-              Whitespaces@41..42 " "
-              LetBinder@42..44
-                Identifier@42..43 "z"
-                Whitespaces@43..44 " "
-              Equal@44..45 "="
-              Whitespaces@45..46 " "
-              Expr@46..52
-                Var@46..52
-                  Identifier@46..51 "apply"
-                  Whitespaces@51..52 " "
-              Error@52..54
-                Equal@52..53 "="
-                Whitespaces@53..54 " "
-              Semicolon@54..55 ";"
-              Whitespaces@55..56 "\n"
-            App@56..72
-              Var@56..62
-                Identifier@56..61 "apply"
-                Whitespaces@61..62 " "
-              ParenthesizedExpr@62..72
-                LeftParen@62..63 "("
-                Expr@63..70
-                  Fun@63..70
-                    Backslash@63..64 "\\"
-                    FunBinder@64..66
-                      Identifier@64..65 "x"
-                      Whitespaces@65..66 " "
-                    Arrow@66..68 "->"
-                    Whitespaces@68..69 " "
-                    Expr@69..70
-                      Var@69..70
-                        Identifier@69..70 "x"
-                RightParen@70..71 ")"
-                Whitespaces@71..72 "\n"
+                  VerticalBar@17..18 "|"
+                  Expr@18..31
+                    Fun@18..31
+                      VerticalBar@18..19 "|"
+                      FunBinder@19..22
+                        Identifier@19..22 "arg"
+                      VerticalBar@22..23 "|"
+                      Whitespaces@23..24 " "
+                      Expr@24..31
+                        App@24..31
+                          Var@24..28
+                            Identifier@24..27 "fun"
+                            Whitespaces@27..28 " "
+                          Var@28..31
+                            Identifier@28..31 "arg"
+              Semicolon@31..32 ";"
+              Whitespaces@32..33 "\n"
+            Let@33..51
+              LetKw@33..36 "let"
+              Whitespaces@36..37 " "
+              LetBinder@37..39
+                Identifier@37..38 "z"
+                Whitespaces@38..39 " "
+              Equal@39..40 "="
+              Whitespaces@40..41 " "
+              Expr@41..47
+                Var@41..47
+                  Identifier@41..46 "apply"
+                  Whitespaces@46..47 " "
+              Error@47..49
+                Equal@47..48 "="
+                Whitespaces@48..49 " "
+              Semicolon@49..50 ";"
+              Whitespaces@50..51 "\n"
+            App@51..65
+              Var@51..57
+                Identifier@51..56 "apply"
+                Whitespaces@56..57 " "
+              ParenthesizedExpr@57..65
+                LeftParen@57..58 "("
+                Expr@58..63
+                  Fun@58..63
+                    VerticalBar@58..59 "|"
+                    FunBinder@59..60
+                      Identifier@59..60 "x"
+                    VerticalBar@60..61 "|"
+                    Whitespaces@61..62 " "
+                    Expr@62..63
+                      Var@62..63
+                        Identifier@62..63 "x"
+                RightParen@63..64 ")"
+                Whitespaces@64..65 "\n"
     "#]];
 
     expect.assert_eq(&format!("{:#?}", SyntaxNode::<Lang>::new_root(tree)));
 
     let expect_errors =
-      expect_test::expect!["[ParseError { expected: [Semicolon], span: 52..54 }]"];
+      expect_test::expect!["[ParseError { expected: [Semicolon], span: 47..49 }]"];
     expect_errors.assert_eq(&format!("{errors:?}"));
   }
 }
