@@ -10,7 +10,11 @@ members = [
   "types/base",
   "types/items",
   "types/rows", 
+  "parser/base",
 ]
+
+[workspace.package]
+edition = "2024"
 
 [workspace.dependencies]
 types-base = { path = "types/base" }
@@ -27,6 +31,6 @@ expect-test = "1.5.1"
 pretty = "0.12.3"
 
 [package]
-name = "type-inference"
+name = "making-a-language"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true

@@ -288,6 +288,7 @@ impl LowerAst {
         let ir_arg = self.lower_ast(*arg);
         IR::app(ir_fun, ir_arg)
       }
+      Ast::Hole(_, _) => panic!("ICE: Hole encountered during lowering"),
     }
   }
 }

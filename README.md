@@ -22,3 +22,5 @@ The stages in the compiler:
   * [base](/closure_convert/base) - Closure convert our base IR.
 * [emit](/emit) - Code emission targeting WebAssembly
   * [base](/emit/base) - Emit Wasm for our closure-converted base IR.
+* [parser](/parser) - Parsing syntax
+  * [base](/parser/base) - Parser for the base language
