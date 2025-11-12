@@ -218,10 +218,10 @@ impl<'a> Parser<'a> {
 
   fn expect(&mut self, token: Syntax, mut anchor_set: HashSet<Syntax>) {
     // Happy path
-    let ControlFlow::Continue(_) = self.ate(token) else {
+    if let ControlFlow::Break(_) = self.ate(token) {
       // If `ate` returns break, it consumed the expected token and we are done.
       return;
-    };
+    }
     // Otherwise, start error recovery
     // We can always recover to our expected token, so ensure it's in the anchor set.
     anchor_set.insert(token);
