@@ -402,6 +402,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "desugar-base"
+version = "0.1.0"
+dependencies = [
+ "im",
+ "parser-base",
+ "types-base",
+]
+
+[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"

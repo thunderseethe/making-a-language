@@ -11,6 +11,7 @@ members = [
   "types/items",
   "types/rows", 
   "parser/base",
+  "desugar/base",
 ]
 
 [workspace.package]
@@ -23,7 +24,8 @@ types-items = { path = "types/items" }
 lowering-base = { path = "lowering/base" }
 simplify-base = { path = "simplify/base" }
 monomorph-base = { path = "monomorph/base" }
-closure-convert-base = { path="closure_convert/base" }
+closure-convert-base = { path = "closure_convert/base" }
+parser-base = { path = "parser/base" }
 ena = "0.14.2"
 im = "15.1"
 pretty_assertions = "1.4"
