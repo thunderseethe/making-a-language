@@ -21,7 +21,7 @@ pub enum NameResolutionError {
 struct NameResolution {
   supply: VarSupply,
   names: std::collections::HashMap<Var, String>,
-  errors: Vec<NameResolutionError>,
+  errors: std::collections::HashMap<NodeId, NameResolutionError>,
 }
 
 impl NameResolution {
@@ -30,10 +30,9 @@ impl NameResolution {
       Ast::Var(id, name) => match env.get(&name).copied() {
         Some(v) => Ast::Var(id, v),
         None => {
-          println!("{env:?}");
           self
             .errors
-            .push(NameResolutionError::UndefinedVar(id, name));
+            .insert(id, NameResolutionError::UndefinedVar(id, name));
           let var = self.supply.supply();
           Ast::Hole(id, var)
         }
@@ -60,7 +59,7 @@ impl NameResolution {
 
 pub struct NameResolutionOut {
   pub ast: Ast<Var>,
-  pub errors: Vec<NameResolutionError>,
+  pub errors: std::collections::HashMap<NodeId, NameResolutionError>,
   pub names: std::collections::HashMap<Var, String>,
 }
 
@@ -76,11 +75,13 @@ pub fn name_resolution(ast: Ast<String>) -> NameResolutionOut {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
+  use std::collections::HashMap;
+
+use super::*;
   use types_base::Ast;
   use types_base::builder::AstBuilder;
 
-  fn name_resolve(input: &str) -> (Ast<Var>, Vec<NameResolutionError>) {
+  fn name_resolve(input: &str) -> (Ast<Var>, HashMap<NodeId, NameResolutionError>) {
     let (cst, _) = parser_base::parse(input);
     let desugar = desugar_base::desugar(cst);
     let nameres = name_resolution(desugar.ast);
@@ -108,6 +109,6 @@ mod tests {
         b.app(b.var(Var(1)), b.var(Var(2))),
       )
     );
-    assert_eq!(errors, vec![]);
+    assert_eq!(errors, HashMap::default());
   }
 }

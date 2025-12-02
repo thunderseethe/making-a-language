@@ -9,7 +9,7 @@ use std::sync::{
 
 use closure_convert_base::ItemId;
 use dashmap::DashMap;
-use desugar_base::{DesugarError, SyncNode};
+use desugar_base::{DesugarError, SyntaxNodeHandle};
 use lowering_base::{IR, LowerOut};
 use name_resolution_base::NameResolutionError;
 use parser_base::{
@@ -97,8 +97,8 @@ pub(crate) enum QueryKey {
   DesugarOf(Uri),
   NameresolveOf(Uri),
   TypesOf(Uri),
-  AstNodeOf(Uri, SyncNode),
-  HoverOf(Uri, SyncNode),
+  AstNodeOf(Uri, SyntaxNodeHandle),
+  HoverOf(Uri, SyntaxNodeHandle),
   NodeStartingAt(Uri, Position),
   ScopeOf(Uri, Position),
   CompletionOf(Uri, Position),
@@ -115,7 +115,7 @@ pub(crate) enum QueryKey {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DesugarOfResult {
   pub ast: Ast<String>,
-  pub ast_to_cst: HashMap<NodeId, SyncNode>,
+  pub ast_to_cst: HashMap<NodeId, SyntaxNodeHandle>,
   pub errors: Vec<PellucidError>,
 }
 
@@ -135,14 +135,20 @@ pub struct TypesOfResult {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PellucidDesugarError {
+  pub node: SyntaxNodeHandle,
   pub kind: desugar_base::DesugarError,
-  pub node: SyncNode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PellucidTypeError {
   pub node: NodeId,
   pub mark: TypeError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PellucidNameResError {
+  pub node: NodeId,
+  pub kind: NameResolutionError,
 }
 
 #[derive(Default, Debug)]
@@ -157,7 +163,7 @@ pub struct Database {
   types_query: DashMap<QueryKey, TypesOfResult>,
   ast_node_query: DashMap<QueryKey, Option<Ast<TypedVar>>>,
   hover_query: DashMap<QueryKey, Option<Hover>>,
-  node_starting_at_query: DashMap<QueryKey, Option<SyncNode>>,
+  node_starting_at_query: DashMap<QueryKey, Option<SyntaxNodeHandle>>,
   completion_query: DashMap<QueryKey, Option<CompletionResponse>>,
   definition_query: DashMap<QueryKey, Option<LspRange>>,
   reference_query: DashMap<QueryKey, Option<Vec<Location>>>,
@@ -413,7 +419,7 @@ impl QueryContext {
 pub enum PellucidError {
   Parser(ParseError),
   Desugar(PellucidDesugarError),
-  Nameres(NameResolutionError),
+  Nameres(PellucidNameResError),
   Types(PellucidTypeError),
 }
 
@@ -473,7 +479,7 @@ impl QueryContext {
         errors.extend(out.errors.into_iter().map(|(ptr, kind)| {
           PellucidError::Desugar(PellucidDesugarError {
             kind,
-            node: SyncNode {
+            node: SyntaxNodeHandle {
               root: cst.clone(),
               ptr,
             },
@@ -499,7 +505,11 @@ impl QueryContext {
         let desugar = this.desugar_of(uri.clone());
         let nameres = name_resolution_base::name_resolution(desugar.ast);
         let mut errors = desugar.errors;
-        errors.extend(nameres.errors.into_iter().map(PellucidError::Nameres));
+        errors.extend(nameres.errors.into_iter().map(|(node, kind)| {
+            PellucidError::Nameres(PellucidNameResError {
+                node, kind
+            })
+        }));
         NameresOfResult {
           ast: nameres.ast,
           names: nameres.names,
@@ -535,7 +545,7 @@ impl QueryContext {
     )
   }
 
-  pub fn ast_node_of(&self, uri: Uri, node: SyncNode) -> Option<Ast<TypedVar>> {
+  pub fn ast_node_of(&self, uri: Uri, node: SyntaxNodeHandle) -> Option<Ast<TypedVar>> {
     self.query(
       QueryKey::AstNodeOf(uri.clone(), node),
       &self.db.ast_node_query,
@@ -635,7 +645,7 @@ impl QueryContext {
     )
   }
 
-  pub fn syntax_node_starting_at(&self, uri: Uri, cursor: Position) -> Option<SyncNode> {
+  pub fn syntax_node_starting_at(&self, uri: Uri, cursor: Position) -> Option<SyntaxNodeHandle> {
     self.query(
       QueryKey::NodeStartingAt(uri, cursor),
       &self.db.node_starting_at_query,
@@ -664,7 +674,7 @@ impl QueryContext {
             },
         };
         let node = token.parent()?;
-        Some(SyncNode {
+        Some(SyntaxNodeHandle {
           root: green,
           ptr: SyntaxNodePtr::new(&node),
         })
@@ -672,7 +682,7 @@ impl QueryContext {
     )
   }
 
-  pub fn hover_of(&self, uri: Uri, node: SyncNode) -> Option<Hover> {
+  pub fn hover_of(&self, uri: Uri, node: SyntaxNodeHandle) -> Option<Hover> {
     self.query(
       QueryKey::HoverOf(uri, node),
       &self.db.hover_query,
@@ -696,7 +706,7 @@ impl QueryContext {
 
         let ast_node = this.ast_node_of(
           uri.clone(),
-          SyncNode {
+          SyntaxNodeHandle {
             root: cst.root.clone(),
             ptr: SyntaxNodePtr::new(&node),
           },
@@ -781,7 +791,7 @@ impl QueryContext {
         let node = token.parent()?;
         let ast_node = this.ast_node_of(
           uri.clone(),
-          SyncNode {
+          SyntaxNodeHandle {
             root,
             ptr: SyntaxNodePtr::new(&node),
           },
@@ -862,6 +872,7 @@ impl QueryContext {
             DesugarError::LetMissingBinding => "Let missing a variable".to_string(),
             DesugarError::LetMissingExpr => "Let missing a rhs expr".to_string(),
             DesugarError::InvalidInt(_) => "Expected an integer".to_string(),
+            DesugarError::FunMissingBinding => "Function missing a parameter".to_string(),
             DesugarError::FunMissingExpr => "Function missing a body".to_string(),
             DesugarError::VarMissingIdentifier => {
               "Expected variable to contain an identifier token".to_string()
@@ -877,15 +888,13 @@ impl QueryContext {
             DesugarError::UnexpectedAtom(kind) => {
               format!("Expecting an atom but found syntax {kind:?}.")
             }
-            DesugarError::UnexpectedInExpr(syntax) => {
-              format!("Expression contained unexpected syntax \"{syntax}\"")
-            }
           },
         ),
         PellucidError::Nameres(nameres) => {
           let desugar = self.desugar_of(uri.clone());
-          let (node_id, var) = match nameres {
-            NameResolutionError::UndefinedVar(node_id, var) => (node_id, var),
+          let node_id = nameres.node;
+          let var = match nameres.kind {
+            NameResolutionError::UndefinedVar(_, var) => var,
           };
           Diagnostic::new_simple(
             newlines
@@ -924,7 +933,7 @@ impl QueryContext {
                 prettyprint_ty(&expected_fun_ty),
                 prettyprint_ty(&inferred_ty)
               ),
-              TypeError::ExpectedUnifyfy { checked, inferred } => format!(
+              TypeError::ExpectedUnify { checked, inferred } => format!(
                 "types: Tried to check this as type {} but it's inferred to have type {}",
                 prettyprint_ty(&checked),
                 prettyprint_ty(&inferred)
