@@ -313,8 +313,8 @@ mod tests {
   use types_base::{self as ast, type_infer, Ast};
 
   fn lower_test(ast: Ast<ast::Var>) -> (IR, Type) {
-    let (ast, scheme) = type_infer(ast).expect("Type inference to succeed");
-    let (ir, ty) = lower(ast, scheme);
+    let out = type_infer(ast);
+    let (ir, ty) = lower(out.ast, out.scheme);
     (ir, ty)
   }
 
@@ -402,7 +402,7 @@ mod tests {
 
     let expect_ir_ty = expect_test::expect![[r#"
         ty_fun [Type, Type, Type] .
-          (T2 -> T1 -> T0) -> (T2 -> T1) -> T2 -> T0"#]];
+          (T2 -> T0 -> T1) -> (T2 -> T0) -> T2 -> T1"#]];
     expect_ir_ty.assert_eq(pretty_string(ir_ty, 80).as_str());
   }
 }

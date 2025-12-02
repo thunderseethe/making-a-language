@@ -489,8 +489,8 @@ mod tests {
   use super::*;
 
   fn simplify(ast: Ast<ast::Var>) -> IR {
-    let (ast, scheme) = type_infer(ast).expect("Type checking failed");
-    let (ir, _) = lower(ast, scheme);
+    let out = type_infer(ast);
+    let (ir, _) = lower(out.ast, out.scheme);
     eprintln!("{}", pretty_string(ir.clone(), 80));
     crate::simplify(ir)
   }

@@ -352,8 +352,8 @@ mod tests {
   use types_base::{self as ast, type_infer, Ast, builder::{make_vars, AstBuilder}};
 
   fn test_lamba_lift(ast: Ast<ast::Var>) -> ClosureConvertOutput {
-    let (ast, scheme) = type_infer(ast).expect("Typechecking to succeed");
-    let (ir, _) = lower(ast, scheme);
+    let type_out = type_infer(ast);
+    let (ir, _) = lower(type_out.ast, type_out.scheme);
     closure_convert(trivial_monomorph(simplify(ir)))
   }
 
