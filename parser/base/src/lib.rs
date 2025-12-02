@@ -201,7 +201,7 @@ impl<'a> Parser<'a> {
         expected,
         span: err_span,
       });
-    }  
+    }
   }
 
   fn ate(&mut self, token: Syntax) -> ControlFlow<()> {

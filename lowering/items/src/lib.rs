@@ -1023,16 +1023,16 @@ fn lower_with_items(item_source: ast::ItemSource, out: TypesOutput) -> (IR, Type
 
   let mut supply = VarSupply::default();
   let mut params = vec![];
-  let ev_to_var: HashMap<ast::Evidence, Var> =
-    lowered_scheme.ev_to_ty
-      .into_iter()
-      .map(|(ev, ty)| {
-        let param = supply.supply();
-        let var = Var::new(param, ty);
-        params.push(var.clone());
-        (ev, var)
-      })
-      .collect();
+  let ev_to_var: HashMap<ast::Evidence, Var> = lowered_scheme
+    .ev_to_ty
+    .into_iter()
+    .map(|(ev, ty)| {
+      let param = supply.supply();
+      let var = Var::new(param, ty);
+      params.push(var.clone());
+      (ev, var)
+    })
+    .collect();
 
   let mut lower_ast = LowerAst {
     supply,
@@ -1054,7 +1054,8 @@ fn lower_with_items(item_source: ast::ItemSource, out: TypesOutput) -> (IR, Type
   let param_ir = params
     .into_iter()
     .rfold(solved_ir, |ir, var| IR::fun(var, ir));
-  let bound_ir = lowered_scheme.kinds
+  let bound_ir = lowered_scheme
+    .kinds
     .into_iter()
     .fold(param_ir, |ir, kind| IR::ty_fun(kind, ir));
   (bound_ir, lowered_scheme.scheme)
@@ -1076,7 +1077,8 @@ fn pretty_string<'a>(
 mod tests {
   use super::*;
   use types_items::{
-    self as ast, type_infer, type_infer_with_items, Ast, ClosedRow, RowVar, TypeScheme, builder::AstBuilder,
+    self as ast, builder::AstBuilder, type_infer, type_infer_with_items, Ast, ClosedRow, RowVar,
+    TypeScheme,
   };
 
   fn lower_test(ast: Ast<ast::Var>) -> (IR, Type) {
@@ -1224,7 +1226,7 @@ mod tests {
     let b = AstBuilder::default();
     let ast = b.concat(
       b.concat(b.label("x", b.int(1)), b.label("y", b.int(2))),
-      b.concat(b.label("a", b.fun(m, b.var(m))), b.label("z", b.int(3)))
+      b.concat(b.label("a", b.fun(m, b.var(m))), b.label("z", b.int(3))),
     );
 
     let (ir, ir_ty) = lower_test(ast);
@@ -1301,12 +1303,15 @@ mod tests {
     let ast = b.branch(
       b.branch(
         b.fun(ast::Var(0), b.unlabel(b.var(ast::Var(0)), "x")),
-        b.fun(ast::Var(1), b.unlabel(b.var(ast::Var(1)), "y"))
+        b.fun(ast::Var(1), b.unlabel(b.var(ast::Var(1)), "y")),
       ),
       b.branch(
-        b.fun(ast::Var(2), b.app(b.unlabel(b.var(ast::Var(2)), "a"), b.int(1))), 
-        b.fun(ast::Var(3), b.unlabel(b.var(ast::Var(3)), "z"))
-      )
+        b.fun(
+          ast::Var(2),
+          b.app(b.unlabel(b.var(ast::Var(2)), "a"), b.int(1)),
+        ),
+        b.fun(ast::Var(3), b.unlabel(b.var(ast::Var(3)), "z")),
+      ),
     );
 
     let (ir, ir_ty) = lower_test(ast);
@@ -1419,9 +1424,7 @@ mod tests {
     let ast = b.app(
       b.app(
         b.item(ast::ItemId(0)),
-        b.concat(
-          b.label("y", b.int(4)), 
-          b.label("z", b.int(6))),
+        b.concat(b.label("y", b.int(4)), b.label("z", b.int(6))),
       ),
       b.fun(ast::Var(0), b.var(ast::Var(0))),
     );

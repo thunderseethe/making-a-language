@@ -135,7 +135,7 @@ impl TypeInference {
     }
   }
 
-  pub(crate) fn substitute_ast(&mut self, ast: Ast<TypedVar>) -> SubstOut<Ast<TypedVar>> { 
+  pub(crate) fn substitute_ast(&mut self, ast: Ast<TypedVar>) -> SubstOut<Ast<TypedVar>> {
     match ast {
       Ast::Var(id, v) => self
         .substitute_ty(v.1)
@@ -179,10 +179,7 @@ impl TypeInference {
     }
   }
 
-  pub(crate) fn substitute_wrapper(
-    &mut self,
-    wrapper: ItemWrapper,
-  ) -> SubstOut<ItemWrapper> {
+  pub(crate) fn substitute_wrapper(&mut self, wrapper: ItemWrapper) -> SubstOut<ItemWrapper> {
     fn transpose<T>(vec: Vec<SubstOut<T>>) -> SubstOut<Vec<T>> {
       let mut subst = SubstOut::new(vec![]);
       for ele in vec {
@@ -218,12 +215,10 @@ impl TypeInference {
           .map(|ev| self.substitute_evidence(ev))
           .collect(),
       ),
-      |(types, rows), evidence| {
-        ItemWrapper {
-          types,
-          rows,
-          evidence,
-        }
+      |(types, rows), evidence| ItemWrapper {
+        types,
+        rows,
+        evidence,
       },
     )
   }

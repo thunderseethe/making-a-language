@@ -52,10 +52,7 @@ impl EmitType {
     let mut sect = TypeSection::new();
     for (i, ty) in self.types.into_iter().enumerate() {
       let (inner, is_final) = match ty {
-        PartialTy::Func(func_type) => (
-          CompositeInnerType::Func(func_type),
-          true,
-        ),
+        PartialTy::Func(func_type) => (CompositeInnerType::Func(func_type), true),
         PartialTy::Struct(fields, is_final) => (
           CompositeInnerType::Struct(StructType {
             fields: fields.into_boxed_slice(),
@@ -237,10 +234,7 @@ impl EmitWasm {
         Instruction::LocalSet(casted_env_local),
       ]);
 
-      locals.locals.insert(
-        params[0].id,
-        casted_env_local,
-      );
+      locals.locals.insert(params[0].id, casted_env_local);
     }
 
     self.emit_ir(body, &mut locals, &mut inss);
@@ -329,10 +323,7 @@ pub fn emit_wasm(items: Vec<(ItemId, Item)>) -> Vec<u8> {
     })
     .collect();
 
-  let mut emitter = EmitWasm {
-    types,
-    functions,
-  };
+  let mut emitter = EmitWasm { types, functions };
   let mut code = CodeSection::default();
   for (_, item) in items {
     code.function(&emitter.emit_item(item));
@@ -878,12 +869,7 @@ mod tests {
     let ast = b.fun(
       add,
       b.locals(
-        [
-          (
-            f,
-            b.apps(b.var(add), [b.int(1)])
-          ),
-        ],
+        [(f, b.apps(b.var(add), [b.int(1)]))],
         b.apps(
           b.var(add),
           [

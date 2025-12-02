@@ -67,9 +67,7 @@ impl IRExt for IR {
       IR::TyFun(_, ir) => ir.size(),
       IR::TyApp(ir, _) => ir.size(),
       IR::Local(var, defn, body) => {
-        defn.size() 
-          + body.size() 
-          + (if var.ty.is_stack_alloc() { 0 } else { 10 })
+        defn.size() + body.size() + (if var.ty.is_stack_alloc() { 0 } else { 10 })
       }
     }
   }
@@ -299,8 +297,7 @@ impl Simplifier {
       Arg::Val(arg) => {
         !arg.is_trivial()
           || match arg {
-            IR::Var(var) => 
-                matches!(in_scope.get(&var.id), Some(Definition::BoundTo(_, _))),
+            IR::Var(var) => matches!(in_scope.get(&var.id), Some(Definition::BoundTo(_, _))),
             _ => false,
           }
       }
@@ -345,9 +342,7 @@ impl Simplifier {
             );
             // We might have inlined all occurrences of var while simplifying body.
             // If our binding is now dead, remove it.
-            ir = if let Occurrence::Dead = 
-                self.occs.lookup_var(&var) 
-            {
+            ir = if let Occurrence::Dead = self.occs.lookup_var(&var) {
               self.locals_inlined += 1;
               body
             } else {
@@ -457,7 +452,7 @@ impl Simplifier {
       Occurrence::Many => {
         let small_enough = ir.size() <= self.inline_size_threshold;
         ir.is_value()
-          && small_enough 
+          && small_enough
           && self.some_benefit(ir, in_scope, ctx)
       },
     }

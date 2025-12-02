@@ -3,7 +3,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use ena::unify::InPlaceUnificationTable;
 
-pub use self::ast::{Ast, Direction, TypedVar, Var, NodeId};
+pub use self::ast::{Ast, Direction, NodeId, TypedVar, Var};
 use self::subst::SubstOut;
 pub use self::ty::{ClosedRow, Row, RowCombination, RowVar, Type, TypeVar};
 use self::unification::TypeError;
@@ -140,22 +140,24 @@ pub fn type_infer(ast: Ast<Var>) -> Result<TypesOutput, TypeError> {
     })
     .collect();
 
-  let row_to_ev = std::mem::take(&mut ctx.row_to_combo).into_iter()
-        .map(|(id, combo)| {
-          let out = ctx.substitute_row_comb(combo);
-          ev_out.unbound_rows.extend(out.unbound_rows);
-          ev_out.unbound_tys.extend(out.unbound_tys);
-          (id, out.value)
-        })
-        .collect();
-  let branch_to_ret_ty = std::mem::take(&mut ctx.branch_to_ret_ty).into_iter()
-      .map(|(id, ty)| {
-        let out = ctx.substitute_ty(ty);
-        ev_out.unbound_rows.extend(out.unbound_rows);
-        ev_out.unbound_tys.extend(out.unbound_tys);
-        (id, out.value)
-      })
-      .collect();
+  let row_to_ev = std::mem::take(&mut ctx.row_to_combo)
+    .into_iter()
+    .map(|(id, combo)| {
+      let out = ctx.substitute_row_comb(combo);
+      ev_out.unbound_rows.extend(out.unbound_rows);
+      ev_out.unbound_tys.extend(out.unbound_tys);
+      (id, out.value)
+    })
+    .collect();
+  let branch_to_ret_ty = std::mem::take(&mut ctx.branch_to_ret_ty)
+    .into_iter()
+    .map(|(id, ty)| {
+      let out = ctx.substitute_ty(ty);
+      ev_out.unbound_rows.extend(out.unbound_rows);
+      ev_out.unbound_tys.extend(out.unbound_tys);
+      (id, out.value)
+    })
+    .collect();
   let subst_out = subst_out.merge(ev_out, |l, _| l);
   // Return our typed ast and it's type scheme
   Ok(TypesOutput {
@@ -167,7 +169,7 @@ pub fn type_infer(ast: Ast<Var>) -> Result<TypesOutput, TypeError> {
       ty: subst_out.value.0,
     },
     row_to_ev,
-    branch_to_ret_ty
+    branch_to_ret_ty,
   })
 }
 
@@ -266,7 +268,7 @@ mod tests {
     let x_ty = Type::fun(Type::Var(a), Type::fun(Type::Var(b), Type::Var(c)));
     let y_ty = Type::fun(Type::Var(a), Type::Var(b));
     assert_eq!(
-      ty_chk.scheme ,
+      ty_chk.scheme,
       TypeScheme {
         unbound_tys: set![a, b, c],
         unbound_rows: set![],
@@ -384,5 +386,4 @@ mod tests {
       }
     );
   }
-
 }

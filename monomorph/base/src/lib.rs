@@ -1,4 +1,4 @@
-use lowering_base::{IR, Type};
+use lowering_base::{Type, IR};
 
 fn instantiate(ir: IR, types: Vec<Type>) -> IR {
   types.into_iter().fold(ir, |ir, ty| {

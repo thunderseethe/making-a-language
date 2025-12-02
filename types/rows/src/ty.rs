@@ -230,6 +230,10 @@ impl RowCombination {
   }
 
   pub fn into_evidence(self) -> Evidence {
-      Evidence::RowEquation { left: self.left, right: self.right, goal: self.goal }
+    Evidence::RowEquation {
+      left: self.left,
+      right: self.right,
+      goal: self.goal,
+    }
   }
 }

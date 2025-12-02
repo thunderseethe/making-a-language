@@ -34,11 +34,14 @@ impl<'a> Instantiate<'a> {
 
   fn evidence(&self, ev: Evidence) -> Constraint {
     match ev {
-      Evidence::RowEquation { left, right, goal } => Constraint::RowCombine(self.id, RowCombination {
-        left: self.row(left),
-        right: self.row(right),
-        goal: self.row(goal),
-      }),
+      Evidence::RowEquation { left, right, goal } => Constraint::RowCombine(
+        self.id,
+        RowCombination {
+          left: self.row(left),
+          right: self.row(right),
+          goal: self.row(goal),
+        },
+      ),
     }
   }
 

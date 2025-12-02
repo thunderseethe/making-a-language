@@ -55,12 +55,12 @@ impl<V> Ast<V> {
       | Ast::Int(node_id, _)
       | Ast::Fun(node_id, _, _)
       | Ast::App(node_id, _, _)
-      |  Ast::Label(node_id, _, _)
-      |  Ast::Unlabel(node_id, _, _)
-      |  Ast::Concat(node_id, _, _)
-      |  Ast::Project(node_id, _, _)
-      |  Ast::Branch(node_id, _, _)
-      |  Ast::Inject(node_id, _, _) => *node_id,
+      | Ast::Label(node_id, _, _)
+      | Ast::Unlabel(node_id, _, _)
+      | Ast::Concat(node_id, _, _)
+      | Ast::Project(node_id, _, _)
+      | Ast::Branch(node_id, _, _)
+      | Ast::Inject(node_id, _, _) => *node_id,
     }
   }
 

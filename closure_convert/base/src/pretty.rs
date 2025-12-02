@@ -1,6 +1,6 @@
 use pretty::{DocAllocator, DocBuilder, Pretty};
 
-use crate::{Item, ItemId, IR, Type, Var};
+use crate::{Item, ItemId, Type, Var, IR};
 
 impl<'a, D> Pretty<'a, D> for ItemId
 where
@@ -89,29 +89,42 @@ where
       Anf::Access(var, field) => var.pretty(a).append(a.as_string(field).brackets()),
     }*/
     match self {
-        IR::Var(var) => var.pretty(a),
-        IR::Int(i) => a.as_string(i),
-        IR::Closure(_, item_id, vars) => a
-            .text("closure")
-            .append(a.space())
-            .append(item_id.pretty(a))
-            .append(a.line().append(a.intersperse(vars.into_iter().map(|var| var.pretty(a)), ", ").brackets()).nest(2).group())
+      IR::Var(var) => var.pretty(a),
+      IR::Int(i) => a.as_string(i),
+      IR::Closure(_, item_id, vars) => a
+        .text("closure")
+        .append(a.space())
+        .append(item_id.pretty(a))
+        .append(
+          a.line()
+            .append(
+              a.intersperse(vars.into_iter().map(|var| var.pretty(a)), ", ")
+                .brackets(),
+            )
+            .nest(2)
+            .group(),
+        )
+        .parens(),
+      IR::Apply(fun, arg) => a
+        .text("apply")
+        .append(a.line().append(fun.pretty(a)).nest(2).group())
+        .append(a.line().append(arg.pretty(a)).nest(2).group())
+        .parens(),
+      IR::Local(var, defn, body) => a
+        .text("let")
+        .append(a.space())
+        .append(
+          var
+            .pretty(a)
+            .append(a.line().append(defn.pretty(a)).nest(2).group())
             .parens(),
-        IR::Apply(fun, arg) => a.text("apply")
-            .append(a.line().append(fun.pretty(a)).nest(2).group())
-            .append(a.line().append(arg.pretty(a)).nest(2).group())
-            .parens(),
-        IR::Local(var, defn, body) => 
-            a.text("let")
-             .append(a.space())
-             .append(var.pretty(a).append(a.line().append(defn.pretty(a)).nest(2).group()).parens())
-             .append(a.line().append(body.pretty(a)).nest(2).group())
-             .parens(),
-        IR::Access(strukt, field) => strukt.pretty(a).append(a.as_string(field).brackets()),
+        )
+        .append(a.line().append(body.pretty(a)).nest(2).group())
+        .parens(),
+      IR::Access(strukt, field) => strukt.pretty(a).append(a.as_string(field).brackets()),
     }
   }
 }
-
 
 impl<'a, D> Pretty<'a, D> for Item
 where

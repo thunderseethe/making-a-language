@@ -74,30 +74,29 @@ where
 
 impl<'a, D> Pretty<'a, D> for Row
 where
-    D: DocAllocator<'a>,
-    DocBuilder<'a, D>: Clone + 'a,
+  D: DocAllocator<'a>,
+  DocBuilder<'a, D>: Clone + 'a,
 {
-    fn pretty(self, a: &'a D) -> DocBuilder<'a, D, ()> {
-        match self {
-            Row::Open(var) => var.pretty(a),
-            Row::Closed(tys) => {
-          let single = a
-            .intersperse(
-              tys.clone().into_iter().map(|ty| ty.pretty(a)),
-              a.text(",").append(a.space()),
-            );
-          let multi = a
-            .space()
-            .append(a.intersperse(
-              tys.into_iter().map(|ty| ty.pretty(a)),
-              a.hardline().append(a.text(", ")),
-            ))
-            .append(a.hardline())
-            .align();
-          multi.flat_alt(single).group()
-            }
-        }
+  fn pretty(self, a: &'a D) -> DocBuilder<'a, D, ()> {
+    match self {
+      Row::Open(var) => var.pretty(a),
+      Row::Closed(tys) => {
+        let single = a.intersperse(
+          tys.clone().into_iter().map(|ty| ty.pretty(a)),
+          a.text(",").append(a.space()),
+        );
+        let multi = a
+          .space()
+          .append(a.intersperse(
+            tys.into_iter().map(|ty| ty.pretty(a)),
+            a.hardline().append(a.text(", ")),
+          ))
+          .append(a.hardline())
+          .align();
+        multi.flat_alt(single).group()
+      }
     }
+  }
 }
 
 impl<'a, D> Pretty<'a, D> for Type
@@ -112,12 +111,16 @@ where
       Type::Fun(arg, ret) => {
         let mut tys = vec![*arg];
         ret.collect_fun_tys_into(&mut tys);
-        a.intersperse(tys.into_iter().map(|ty| 
+        a.intersperse(
+          tys.into_iter().map(|ty| {
             if ty.requires_paren() {
               ty.pretty(a).parens()
             } else {
               ty.pretty(a)
-            }), " -> ")
+            }
+          }),
+          " -> ",
+        )
       }
       Type::TyFun(kind, ty) => {
         let mut kinds = vec![kind];
@@ -141,17 +144,17 @@ where
   }
 }
 
-impl<'a, D> Pretty<'a, D> for TyApp 
+impl<'a, D> Pretty<'a, D> for TyApp
 where
   D: DocAllocator<'a>,
   DocBuilder<'a, D>: Clone + 'a,
 {
-    fn pretty(self, a: &'a D) -> DocBuilder<'a, D, ()> {
-        match self {
-            TyApp::Ty(ty) => a.text("Ty").append(ty.pretty(a).parens()),
-            TyApp::Row(row) => a.text("Row").append(row.pretty(a).parens()),
-        }
+  fn pretty(self, a: &'a D) -> DocBuilder<'a, D, ()> {
+    match self {
+      TyApp::Ty(ty) => a.text("Ty").append(ty.pretty(a).parens()),
+      TyApp::Row(row) => a.text("Row").append(row.pretty(a).parens()),
     }
+  }
 }
 
 impl IR {
@@ -301,7 +304,7 @@ where
           .append(a.line().append(body.pretty(a)).nest(2))
           .parens()
           .group()
-      },
+      }
       IR::Tuple(elems) => {
         let single = a
           .intersperse(

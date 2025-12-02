@@ -54,7 +54,11 @@ impl ClosedRow {
   }
 
   /// Check if our closed row mentions any of our unbound types or rows.
-  pub fn mentions(&self, unbound_tys: &HashSet<TypeUniVar>, unbound_rows: &HashSet<RowUniVar>) -> bool {
+  pub fn mentions(
+    &self,
+    unbound_tys: &HashSet<TypeUniVar>,
+    unbound_rows: &HashSet<RowUniVar>,
+  ) -> bool {
     for ty in self.values.iter() {
       if ty.mentions(unbound_tys, unbound_rows) {
         return true;
@@ -155,7 +159,11 @@ impl Type {
     }
   }
 
-  pub fn mentions(&self, unbound_tys: &HashSet<TypeUniVar>, unbound_rows: &HashSet<RowUniVar>) -> bool {
+  pub fn mentions(
+    &self,
+    unbound_tys: &HashSet<TypeUniVar>,
+    unbound_rows: &HashSet<RowUniVar>,
+  ) -> bool {
     match self {
       Type::Int | Type::Var(_) => false,
       Type::Unifier(v) => unbound_tys.contains(v),
@@ -178,12 +186,12 @@ pub struct RowVar(pub u32);
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 pub struct RowUniVar {
-    pub id: u32,
+  pub id: u32,
 }
 impl RowUniVar {
-    pub fn new(id: u32) -> Self {
-        Self { id }
-    }
+  pub fn new(id: u32) -> Self {
+    Self { id }
+  }
 }
 
 impl UnifyKey for RowUniVar {
@@ -207,16 +215,16 @@ pub struct TypeVar(pub u32);
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 pub struct TypeUniVar {
-    pub id: u32,
+  pub id: u32,
 }
 impl TypeUniVar {
-    pub fn new(id: u32) -> Self {
-        Self { id }
-    }
+  pub fn new(id: u32) -> Self {
+    Self { id }
+  }
 
-    pub fn rigid(id: u32) -> Self {
-        Self { id }
-    }
+  pub fn rigid(id: u32) -> Self {
+    Self { id }
+  }
 }
 impl UnifyKey for TypeUniVar {
   type Value = Option<Type>;
@@ -264,6 +272,10 @@ impl RowCombination {
   }
 
   pub fn into_evidence(self) -> Evidence {
-    Evidence::RowEquation { left: self.left, right: self.right, goal: self.goal }
+    Evidence::RowEquation {
+      left: self.left,
+      right: self.right,
+      goal: self.goal,
+    }
   }
 }

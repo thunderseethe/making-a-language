@@ -68,7 +68,11 @@ impl TypeInference {
         let (body_out, body_ty) = self.infer(env, *body);
         (
           InferOut {
-            typed_ast: Ast::fun(id, TypedVar(arg, Type::Unifier(arg_ty_var)), body_out.typed_ast),
+            typed_ast: Ast::fun(
+              id,
+              TypedVar(arg, Type::Unifier(arg_ty_var)),
+              body_out.typed_ast,
+            ),
             ..body_out
           },
           Type::fun(Type::Unifier(arg_ty_var), body_ty),
@@ -106,8 +110,9 @@ impl TypeInference {
         let value_var = self.fresh_ty_var();
         let expected_ty = Type::label(label.clone(), Type::Unifier(value_var));
         let out = self.check(env, *value, expected_ty);
-        ( out.with_typed_ast(|ast| Ast::unlabel(id, ast, label))
-        , Type::Unifier(value_var)
+        (
+          out.with_typed_ast(|ast| Ast::unlabel(id, ast, label)),
+          Type::Unifier(value_var),
         )
       }
       // Products
@@ -128,11 +133,7 @@ impl TypeInference {
         constraints.push(Constraint::RowCombine(id, row_comb.clone()));
         self.row_to_ev.insert(id, row_comb);
 
-        let typed_ast = Ast::concat(
-          id, 
-          left_out.typed_ast,
-          right_out.typed_ast,
-        );
+        let typed_ast = Ast::concat(id, left_out.typed_ast, right_out.typed_ast);
 
         (
           InferOut {
@@ -197,11 +198,7 @@ impl TypeInference {
         (
           InferOut {
             constraints,
-            typed_ast: Ast::branch(
-              id,
-              left_out.typed_ast,
-              right_out.typed_ast,
-            ),
+            typed_ast: Ast::branch(id, left_out.typed_ast, right_out.typed_ast),
           },
           out_ty,
         )
@@ -275,11 +272,8 @@ impl TypeInference {
             .collect(),
         };
         self.item_wrappers.insert(id, wrapper);
-        (
-          InferOut::new(constraints, Ast::Item(id, item_id)),
-          ty,
-        )
-      },
+        (InferOut::new(constraints, Ast::Item(id, item_id)), ty)
+      }
     }
   }
 
@@ -344,7 +338,9 @@ impl TypeInference {
           right,
           goal: goal_row,
         };
-        out.constraints.push(Constraint::RowCombine(id, row_comb.clone()));
+        out
+          .constraints
+          .push(Constraint::RowCombine(id, row_comb.clone()));
         self.row_to_ev.insert(id, row_comb);
 
         out.with_typed_ast(|ast| Ast::project(id, dir, ast))
@@ -386,10 +382,7 @@ impl TypeInference {
 
         InferOut {
           constraints,
-          typed_ast: Ast::branch(
-              id,
-              left_out.typed_ast, 
-              right_out.typed_ast),
+          typed_ast: Ast::branch(id, left_out.typed_ast, right_out.typed_ast),
         }
       }
       (Ast::Inject(id, dir, value), Type::Sum(goal)) => {
@@ -404,7 +397,9 @@ impl TypeInference {
           right: Row::Unifier(right),
           goal,
         };
-        out.constraints.push(Constraint::RowCombine(id, row_comb.clone()));
+        out
+          .constraints
+          .push(Constraint::RowCombine(id, row_comb.clone()));
         out.with_typed_ast(|ast| Ast::inject(id, dir, ast))
       }
       (ast, expected_ty) => {

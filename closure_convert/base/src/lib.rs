@@ -223,10 +223,8 @@ impl ClosureConvert {
     let mut free_vars = body.free_vars();
     free_vars.remove(&var);
 
-    let vars: Vec<Var> = 
-      free_vars.iter().cloned().collect();
-    let closure_ty = 
-      Type::closure(var.ty.clone(), ret.clone());
+    let vars: Vec<Var> = free_vars.iter().cloned().collect();
+    let closure_ty = Type::closure(var.ty.clone(), ret.clone());
     let env_var = Var {
       id: self.var_supply.supply(),
       ty: Type::closure_env(
@@ -345,11 +343,15 @@ pub fn closure_convert(ir: lowering::IR) -> ClosureConvertOutput {
 mod tests {
   use super::*;
   use expect_test::expect;
-  use lowering_base::pretty::pretty_string;
   use lowering_base::lower;
+  use lowering_base::pretty::pretty_string;
   use monomorph_base::trivial_monomorph;
   use simplify_base::simplify;
-  use types_base::{self as ast, type_infer, Ast, builder::{make_vars, AstBuilder}};
+  use types_base::{
+    self as ast,
+    builder::{make_vars, AstBuilder},
+    type_infer, Ast,
+  };
 
   fn test_lamba_lift(ast: Ast<ast::Var>) -> ClosureConvertOutput {
     let type_out = type_infer(ast);
