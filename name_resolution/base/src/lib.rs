@@ -27,6 +27,12 @@ struct NameResolution {
 impl NameResolution {
   fn resolve(&mut self, ast: Ast<String>, env: im::HashMap<String, Var>) -> Ast<Var> {
     match ast {
+      Ast::Fun(id, name, body) => {
+        let var = self.supply.supply();
+        self.names.insert(var, name.clone());
+        let body = self.resolve(*body, env.update(name, var));
+        Ast::fun(id, var, body)
+      }
       Ast::Var(id, name) => match env.get(&name).copied() {
         Some(v) => Ast::Var(id, v),
         None => {
@@ -36,23 +42,18 @@ impl NameResolution {
           let var = self.supply.supply();
           Ast::Hole(id, var)
         }
-      },
-      Ast::Int(id, i) => Ast::Int(id, i),
-      Ast::Hole(id, _) => {
-        let var = self.supply.supply();
-        Ast::Hole(id, var)
       }
-      Ast::Fun(id, name, body) => {
+      Ast::Hole(id, name) => {
         let var = self.supply.supply();
         self.names.insert(var, name.clone());
-        let body = self.resolve(*body, env.update(name, var));
-        Ast::fun(id, var, body)
+        Ast::Hole(id, var)
       }
       Ast::App(id, fun, arg) => {
         let fun = self.resolve(*fun, env.clone());
         let arg = self.resolve(*arg, env);
         Ast::app(id, fun, arg)
       }
+      Ast::Int(id, i) => Ast::Int(id, i),
     }
   }
 }
@@ -91,8 +92,8 @@ use super::*;
   #[test]
   fn shadowing_works_as_expected() {
     let input = r#"
-    let x = \x -> x;
-    let y = \y -> x;
+    let x = |x| x;
+    let y = |y| x y;
     let x = 3;
     y x"#;
 
@@ -103,7 +104,7 @@ use super::*;
       b.locals(
         [
           (Var(0), b.fun(Var(4), b.var(Var(4)))),
-          (Var(1), b.fun(Var(3), b.var(Var(0)))),
+          (Var(1), b.fun(Var(3), b.app(b.var(Var(0)), b.var(Var(3))))),
           (Var(2), b.int(3))
         ],
         b.app(b.var(Var(1)), b.var(Var(2))),
