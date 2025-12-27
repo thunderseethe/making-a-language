@@ -1,0 +1,316 @@
+@font-face {
+  font-family: 'FiraCode';
+  src: url('./FiraCode-VF.woff2') format('woff2');
+  font-weight: 125 950;
+  font-stretch: 75% 125%;
+  font-style: normal;
+}
+
+:root {
+  color-scheme: light dark;
+  --bg-color: light-dark(#fafafa, #212121);
+  --fg-color: light-dark(#212121, #dadada);
+  --acc-color: light-dark(#c3b1e1, #5d3fd3);
+  --alt-bg-color: light-dark(#e0e0e0, #424242);
+  --alt-fg-color: light-dark(#000, #dadada);
+  --darker-alt-bg-color: light-dark(#ccc, #4f4f4f);
+  --link-color: light-dark(#1565c0, #42a5f5);
+
+  /* Notice colors */
+  --fg-color-notice-note-icon: #5e35b1;
+  --bg-color-notice-note-title: #673ab71a;
+  --bg-color-notice-note-content: #7e57c21a;
+  --fg-color-notice-tip-icon: #00897b;
+  --bg-color-notice-tip-title: #0096881a;
+  --bg-color-notice-tip-content: #26a69a1a;
+  --fg-color-notice-example-icon: #6d4c41;
+  --bg-color-notice-example-title: #7955481a;
+  --bg-color-notice-example-content: #8d6e631a;
+  --fg-color-notice-question-icon: #7cb342;
+  --bg-color-notice-question-title: #8bc34a1a;
+  --bg-color-notice-question-content: #9ccc651a;
+  --fg-color-notice-info-icon: #1e88e5;
+  --bg-color-notice-info-title: #2196f31a;
+  --bg-color-notice-info-content: #42a5f51a;
+  --fg-color-notice-warning-icon: #ffb300;
+  --bg-color-notice-warning-title: #ffc1071a;
+  --bg-color-notice-warning-content: #ffca281a;
+  --fg-color-notice-error-icon: #e53935;
+  --bg-color-notice-error-title: #f443361a;
+  --bg-color-notice-error-content: #ef53501a;
+}
+
+main {
+  width: 100%;
+  height: 100%;
+  min-height: 100%;
+  background-color: var(--bg-color);
+  font-family: "FiraCode";
+  font-variant-ligatures: normal;
+}
+
+#content {
+  flex: 1 1 auto;
+  display: grid;
+  align-content: stretch;
+  min-height: 100%;
+  grid:
+    "header header" 2.5rem
+    "editor trees" 3fr
+    "repl repl" 1fr
+    / 50% 50%;
+}
+
+#editor {
+  grid-area: editor;
+  overflow: visible;
+  min-height: 0;
+  align-items: stretch;
+  width: 100%;
+  height: 100%;
+}
+
+#treeTab {
+  grid-area: trees;
+  overflow: scroll;
+  width: 100%;
+  height: 100%;
+}
+
+#repl {
+  resize: vertical;
+  grid-area: repl;
+  overflow: scroll;
+  width: 100%;
+  height: 100%;
+  tabs {
+    width: 100%;
+    background-color: var(--bg-color);
+  }
+  #output-tab-content, #log-tab-content {
+    margin-left: 1rem;
+  }
+  #log-tab-content {
+    h4, h5, h6 {
+      display: inline-block;
+      margin-top: 0.2rem;
+      margin-bottom: 0.2rem;
+    }
+    li {
+      list-style-type: none;
+    }
+  }
+}
+
+.tree {
+  details {
+    position: relative;
+  }
+  details:open::after {
+    background-color: var(--alt-fg-color);
+    content: '';
+    height: calc(100% - 26px);
+    left: 4px;
+    position: absolute;
+    top: 26px;
+    width: 1px;
+  }
+  ul {
+    padding-left: 20px;
+  }
+  summary {
+    margin-bottom: 10px;
+  }
+  li {
+    list-style-type: none;
+    cursor: pointer;
+  }
+  .keyword {
+    color: #c678dd;
+  }
+  .number {
+    color: #e5c07b;
+  }
+  .variable {
+    color: color-mix(in srgb, var(--fg-color) 50%, var(--acc-color));
+  }
+  a.variable[data-title]:hover::after {
+    content: attr(data-title);
+    position: absolute;
+    background-color: var(--alt-bg-color);
+    color: var(--alt-fg-color);
+    z-index: 1;
+  }
+  .punctuation {
+    color: var(--alt-fg-color);
+  }
+}
+
+body:has(#cst-tab:not(:checked)) #cst-tab-content,
+body:has(#ast-tab:not(:checked)) #ast-tab-content,
+body:has(#ir-tab:not(:checked)) #ir-tab-content,
+body:has(#simple-ir-tab:not(:checked)) #simple-ir-tab-content,
+body:has(#wasm-tab:not(:checked)) #wasm-tab-content,
+body:has(#log-tab:not(:checked)) #log-tab-content,
+body:has(#output-tab:not(:checked)) #output-tab-content
+{
+  display: none;
+}
+
+tab-content {
+  overflow: scroll;
+  padding: 0.5rem;
+}
+
+tabs {
+  position: sticky;
+  z-index: 1;
+  top: 0px;
+  display: flex;
+  width: 100%;
+  flex-flow: row nowrap;
+  label {
+    &.grow {
+      flex-grow: 1;
+    }
+    padding: 10px;
+    text-align: center;
+    background: var(--bg-color);
+    color: var(--fg-color);
+    &:has(input:checked) {
+      color: color-mix(in srgb, var(--acc-color) 80%, white);
+      border-bottom: 0.1rem solid var(--acc-color);
+    }
+    &:hover { 
+      background: var(--alt-bg-color); 
+      color: var(--alt-fg-color);
+    }
+    &:active {
+      background: var(--alt-bg-color);
+    }
+    a {
+      font-family: 'Verdana', 'sans-serif';
+    }
+  }
+  input {
+    /* To allow screen reader to still access these. */
+    opacity: 0;
+    position: absolute;
+    pointer-events: none;
+  }
+}
+
+tabs.around {
+  justify-content: space-around;
+}
+
+tab.start {
+  justify-content: flex-start;
+}
+
+nav {
+  grid-area: header;
+  box-sizing: border-box;
+  display: flex;
+  flex-flow: row nowrap;
+  justify-content: space-around;
+  width: 100%;
+  background-color: var(--acc-color);
+  section.container {
+    box-sizing: border-box;
+    display: block;
+    margin: 0.8rem 0.8rem;
+    max-width: 90rem;
+    width: 100%;
+    padding-left: 2rem;
+    padding-right: 2rem;
+  }
+  section.container a, section.container button {
+    color: var(--fg-color);
+    display: inline;
+    font-size: 1rem;
+    font-weight: 600;
+    text-decoration: none;
+    margin-left: 2rem;
+    margin-right: 2rem;
+    font-family: 'Verdana', 'sans-serif';
+  }
+  section.container button {
+    background: none!important;
+    border: none;
+    padding: 0!important;
+    cursor: pointer;
+  }
+  section.container a:hover {
+    text-decoration: underline;
+  }
+  section.container button:hover {
+    text-decoration: underline;
+  }
+}
+
+.json {
+  font-family: 'FiraCode', monospace;
+}
+
+.json > .json__item {
+  display: block;
+}
+
+.json__item {
+    margin-top: 10px;
+    padding-left: 20px;
+}
+
+.json__item--collapsible {
+    cursor: pointer;
+    overflow: hidden;
+    position: relative;
+        
+    &::after {
+        background-color: var(--alt-fg-color);
+        content: '';
+        height: 100%;
+        left: 23px;
+        position: absolute;
+        top: 26px;
+        width: 1px;
+    }
+    
+    &:hover {
+        & > .json__key,
+        & > .json__value {
+            text-decoration: underline;
+        }
+    }
+}
+
+.json__key {
+    color: #c678dd;
+    display: inline;
+    
+    &::after {
+        content: ': ';
+    }
+}
+
+.json__value {
+    display: inline;
+}
+
+.json__value--string {
+    color: var(--fg-color-notice-question-icon);
+}
+
+.json__value--number {
+    color: #e5c07b;
+}
+
+.json__value--boolean {
+    color: var(--fg-color-notice-error-icon);
+}
+
+.cm-tooltip {
+  position: absolute;
+  z-index: 100;
+}

@@ -28,7 +28,9 @@ parking_lot.workspace = true
 petgraph = "0.8.2"
 serde_json = "1.0.142"
 pretty.workspace = true
+rowan.workspace = true
 wasmprinter.workspace = true
 wasmparser.workspace = true
 wast.workspace = true
+logos.workspace = true
 

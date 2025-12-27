@@ -21,7 +21,7 @@ use tower_lsp_server::lsp_types::{
   CompletionItem, CompletionItemKind, CompletionResponse, Diagnostic, Hover, HoverContents, LSPAny,
   LanguageString, Location, MarkedString, Position, Range as LspRange, Uri,
 };
-use types_base::{Ast, TypeError, NodeId, Type, TypeScheme, TypedVar, Var};
+use types_base::{Ast, NodeId, Type, TypeError, TypeScheme, TypedVar, Var};
 
 use self::graph::DepGraph;
 use self::prettyprint::{PrettyprintType, prettyprint_ty};
@@ -505,11 +505,12 @@ impl QueryContext {
         let desugar = this.desugar_of(uri.clone());
         let nameres = name_resolution_base::name_resolution(desugar.ast);
         let mut errors = desugar.errors;
-        errors.extend(nameres.errors.into_iter().map(|(node, kind)| {
-            PellucidError::Nameres(PellucidNameResError {
-                node, kind
-            })
-        }));
+        errors.extend(
+          nameres
+            .errors
+            .into_iter()
+            .map(|(node, kind)| PellucidError::Nameres(PellucidNameResError { node, kind })),
+        );
         NameresOfResult {
           ast: nameres.ast,
           names: nameres.names,
@@ -620,27 +621,34 @@ impl QueryContext {
 
         let newlines = self.newlines_of(uri.clone());
         let vars = ast.var_reference(&var.0);
-        Some(vars.into_iter().filter_map(|var| {
-          let id = var.id();
-          let sync_node = ast_to_cst.get(&id).or_else(|| {
-            let Ast::Fun(_, _, _) = var else {
-              return None;
-            };
-            let parent_id = ast.parent_of(id)?.id();
-            ast_to_cst.get(&parent_id)
-          })?;
-          let root = SyntaxNode::new_root(sync_node.root.clone());
-          let mut syntax = sync_node.ptr.to_node(&root);
-          if [Syntax::Fun, Syntax::Let].contains(&syntax.kind()) {
-            syntax = syntax.first_child_by_kind(&|kind| [Syntax::LetBinder, Syntax::FunBinder].contains(&kind))?;
-          }
-          let token = syntax.first_token()?;
-          let range = newlines.lsp_range_for(token.text_range().into())?;
-          Some(Location {
-            uri: uri.clone(),
-            range
-          })
-        }).collect())
+        Some(
+          vars
+            .into_iter()
+            .filter_map(|var| {
+              let id = var.id();
+              let sync_node = ast_to_cst.get(&id).or_else(|| {
+                let Ast::Fun(_, _, _) = var else {
+                  return None;
+                };
+                let parent_id = ast.parent_of(id)?.id();
+                ast_to_cst.get(&parent_id)
+              })?;
+              let root = SyntaxNode::new_root(sync_node.root.clone());
+              let mut syntax = sync_node.ptr.to_node(&root);
+              if [Syntax::Fun, Syntax::Let].contains(&syntax.kind()) {
+                syntax = syntax.first_child_by_kind(&|kind| {
+                  [Syntax::LetBinder, Syntax::FunBinder].contains(&kind)
+                })?;
+              }
+              let token = syntax.first_token()?;
+              let range = newlines.lsp_range_for(token.text_range().into())?;
+              Some(Location {
+                uri: uri.clone(),
+                range,
+              })
+            })
+            .collect(),
+        )
       },
     )
   }
@@ -662,16 +670,18 @@ impl QueryContext {
           .unwrap();
         let token = cst.token_at_offset(TextSize::from(byte));
         let token = match token {
-            parser_base::rowan::TokenAtOffset::None => return None,
-            parser_base::rowan::TokenAtOffset::Single(token) => token,
-            // Bias away from whitespace as it's unlikely to be what we want.
-            // Bias towards identifiers, as they're more likely to be semantically interesting.
-            // Othewrise choose the left one
-            parser_base::rowan::TokenAtOffset::Between(left, right) => match (left.kind(), right.kind()) {
+          parser_base::rowan::TokenAtOffset::None => return None,
+          parser_base::rowan::TokenAtOffset::Single(token) => token,
+          // Bias away from whitespace as it's unlikely to be what we want.
+          // Bias towards identifiers, as they're more likely to be semantically interesting.
+          // Othewrise choose the left one
+          parser_base::rowan::TokenAtOffset::Between(left, right) => {
+            match (left.kind(), right.kind()) {
               (_, Syntax::Whitespaces) | (Syntax::Identifier, _) => left,
               (Syntax::Whitespaces, _) | (_, Syntax::Identifier) => right,
-              _ => left
-            },
+              _ => left,
+            }
+          }
         };
         let node = token.parent()?;
         Some(SyntaxNodeHandle {
@@ -945,195 +955,6 @@ impl QueryContext {
       .collect()
   }
 
-  pub fn show_trees_of(&self, uri: Uri) -> LSPAny {
-    self.query(
-      QueryKey::ShowTreesOf(uri.clone()),
-      &self.db.show_trees_query,
-      |this, _| {
-        let (green, _) = this.cst_of(uri.clone());
-        let desugar = this.desugar_of(uri.clone());
-        let types = this.types_of(uri.clone());
-
-        let root = SyntaxNode::<Lang>::new_root(green);
-
-        fn cst_to_json(nort: NodeOrToken<SyntaxNode<Lang>, SyntaxToken<Lang>>) -> LSPAny {
-          let kind: u64 = nort.kind() as u64;
-          let text_range: std::ops::Range<usize> = nort.text_range().into();
-          json!({
-            "key": kind,
-            "text_range": {
-              "start": text_range.start,
-              "end": text_range.end
-            },
-            "children": if let NodeOrToken::Node(node) = nort {
-              Some(node.children_with_tokens().map(cst_to_json).collect::<Vec<_>>())
-            } else {
-              None
-            }
-          })
-        }
-
-        fn zip_ast(left: Ast<String>, right: Ast<TypedVar>) -> Ast<(String, TypedVar)> {
-          match (left, right) {
-            (Ast::Var(left_id, a), Ast::Var(right_id, b)) if left_id == right_id => {
-              Ast::Var(left_id, (a, b))
-            }
-            // After desugaring, the only way we introdue a new hole is when we fail to resolve a
-            // name, so we handle that case explicilty here.
-            (Ast::Var(left_id, a), Ast::Hole(right_id, b)) if left_id == right_id => {
-              Ast::Hole(left_id, (a, b))
-            }
-            (Ast::Int(left_id, a), Ast::Int(right_id, _)) if left_id == right_id => {
-              Ast::Int(left_id, a)
-            }
-            (Ast::Fun(left_id, a_var, a_body), Ast::Fun(right_id, b_var, b_body))
-              if left_id == right_id =>
-            {
-              let body = zip_ast(*a_body, *b_body);
-              Ast::fun(left_id, (a_var, b_var), body)
-            }
-            (Ast::App(left_id, a_fun, a_arg), Ast::App(right_id, b_fun, b_arg))
-              if left_id == right_id =>
-            {
-              let fun = zip_ast(*a_fun, *b_fun);
-              let arg = zip_ast(*a_arg, *b_arg);
-              Ast::app(left_id, fun, arg)
-            }
-            (Ast::Hole(left_id, a_hole), Ast::Hole(right_id, b_hole)) if left_id == right_id => {
-              Ast::Hole(left_id, (a_hole, b_hole))
-            }
-            // Outside of our one case with Var, we should not see two different Ast nodes meet or
-            // an Ast node meet a Hole, so we error if that does arise.
-            (left, right) => unreachable!("{left:?} does not zip with {right:?}"),
-          }
-        }
-
-        fn ast_to_json(printer: &mut PrettyprintType, ast: Ast<(String, TypedVar)>) -> LSPAny {
-          match ast {
-            Ast::Var(_, (name, ty)) => json!({
-              "kind": "var",
-              "name": name,
-              "type": printer.prettyprint(&ty.1),
-            }),
-            Ast::Int(_, i) => json!({
-              "kind": "int",
-              "vallue": i
-            }),
-            Ast::Fun(_, (name, ty), body) => json!({
-              "kind": "fun",
-              "name": name,
-              "type": printer.prettyprint(&ty.1),
-              "body": ast_to_json(printer, *body)
-            }),
-            Ast::App(_, fun, arg) => json!({
-              "kind": "app",
-              "fun": ast_to_json(printer, *fun),
-              "arg": ast_to_json(printer, *arg),
-            }),
-            Ast::Hole(_, (_, ty)) => json!({
-              "kind": "hole",
-              "type": printer.prettyprint(&ty.1)
-            }),
-          }
-        }
-
-        let ast = zip_ast(desugar.ast, types.ast);
-        let mut printer = PrettyprintType::new();
-        let ast_json = ast_to_json(&mut printer, ast);
-
-        let cst_json = cst_to_json(NodeOrToken::Node(root));
-
-        fn ir_to_json(
-          printer: &mut PrettyprintType,
-          names: &HashMap<lowering_base::VarId, String>,
-          ir: lowering_base::IR,
-        ) -> LSPAny {
-          let var_name = |var_id| {
-            if let Some(name) = names.get(var_id) {
-              name.clone()
-            } else {
-              format!("{var_id}")
-            }
-          };
-          match ir {
-            IR::Var(var) => json!({
-              "kind": "var",
-              "name": var_name(&var.id),
-              "type": printer.prettyprint_ir(&var.ty),
-            }),
-            IR::Int(i) => json!({
-              "kind": "int",
-              "value": i,
-            }),
-            IR::Fun(var, ir) => json!({
-              "kind": "fun",
-              "name": var_name(&var.id),
-              "type": printer.prettyprint_ir(&var.ty),
-              "body": ir_to_json(printer, names, *ir),
-            }),
-            IR::App(fun, arg) => json!({
-              "kind": "app",
-              "fun": ir_to_json(printer, names, *fun),
-              "arg": ir_to_json(printer, names, *arg),
-            }),
-            IR::TyFun(kind, ir) => json!({
-              "kind": "ty_fun",
-              "ty_fun_kind": format!("{:?}", kind),
-              "body": ir_to_json(printer, names, *ir)
-            }),
-            IR::TyApp(ir, ty) => json!({
-              "kind": "ty_app",
-              "ty_fun": ir_to_json(printer, names, *ir),
-              "type": printer.prettyprint_ir(&ty),
-            }),
-            IR::Local(var, defn, body) => json!({
-              "kind": "local",
-              "name": var_name(&var.id),
-              "type": printer.prettyprint_ir(&var.ty),
-              "defn": ir_to_json(printer, names, *defn),
-              "body": ir_to_json(printer, names, *body),
-            }),
-          }
-        }
-
-        let names = this.nameresolve_of(uri.clone()).names;
-        let ir_vars = this
-          .ir_of(uri.clone())
-          .map(|ir| ir.vars)
-          .unwrap_or_default();
-        let mut ir_names = HashMap::default();
-        for (ast_var, ir_var) in ir_vars {
-          if let Some(name) = names.get(&ast_var) {
-            ir_names.insert(ir_var, name.clone());
-          }
-        }
-        let ir = this
-          .ir_of(uri.clone())
-          .map(|lower| ir_to_json(&mut printer, &ir_names, lower.ir));
-        let simple_ir = this
-          .simple_ir_of(uri.clone())
-          .map(|ir| ir_to_json(&mut printer, &ir_names, ir));
-        let wasm: Option<String> = this.wasm_of(uri.clone()).map(|wasm| {
-          let mut out = PrintHtmlWrite::default();
-          wasmprinter::Config::new()
-            .fold_instructions(true)
-            .indent_text("  ")
-            .print(&wasm, &mut out)
-            .expect("Failed to print wat from wasm");
-          out.into()
-        });
-
-        json!({
-          "cst": cst_json,
-          "ast": ast_json,
-          "ir": ir,
-          "simple_ir": simple_ir,
-          "wasm": wasm,
-        })
-      },
-    )
-  }
-
   pub fn ir_of(&self, uri: Uri) -> Option<LowerOut> {
     self.query(QueryKey::IrOf(uri), &self.db.ir_query, |this, key| {
       let QueryKey::IrOf(uri) = key else {
@@ -1233,6 +1054,8 @@ impl QueryContext {
     )
   }
 }
+
+mod show_trees;
 
 trait Find<T> {
   fn find(&self, id: NodeId) -> Option<&Self>;
