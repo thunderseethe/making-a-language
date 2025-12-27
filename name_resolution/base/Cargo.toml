@@ -1,0 +1,12 @@
+[package]
+name = "name-resolution-base"
+version = "0.1.0"
+edition.workspace = true
+
+[dev-dependencies]
+parser-base.workspace = true
+desugar-base.workspace = true
+
+[dependencies]
+types-base.workspace = true
+im.workspace = true

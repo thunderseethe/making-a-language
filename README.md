@@ -24,3 +24,7 @@ The stages in the compiler:
   * [base](/emit/base) - Emit Wasm for our closure-converted base IR.
 * [parser](/parser) - Parsing syntax
   * [base](/parser/base) - Parser for the base language
+* [desugar](/desugar) - Desugaring our CST into an AST
+  * [base](/desugar/base) - Desugaring for the base language
+* [name_resolution](/name_resolution) - Name resolution
+  * [base](/name_resolution/base) - Name resolution for the base language

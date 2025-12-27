@@ -12,6 +12,7 @@ members = [
   "types/rows", 
   "parser/base",
   "desugar/base",
+  "name_resolution/base",
 ]
 
 [workspace.package]
@@ -26,6 +27,7 @@ simplify-base = { path = "simplify/base" }
 monomorph-base = { path = "monomorph/base" }
 closure-convert-base = { path = "closure_convert/base" }
 parser-base = { path = "parser/base" }
+desugar-base = { path = "desugar/base" }
 ena = "0.14.2"
 im = "15.1"
 pretty_assertions = "1.4"

@@ -946,6 +946,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "name-resolution-base"
+version = "0.1.0"
+dependencies = [
+ "desugar-base",
+ "im",
+ "parser-base",
+ "types-base",
+]
+
+[[package]]
 name = "object"
 version = "0.36.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
