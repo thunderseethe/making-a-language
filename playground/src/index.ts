@@ -254,11 +254,22 @@ function showTrees(plugin: LSPPlugin): void {
     }
     if (trees.wasm) {
       console.log(trees.wasm);
-      let code = document.createElement("code");
-      code.innerHTML = trees.wasm;
-      let pre = document.createElement("pre");
-      pre.appendChild(code);
-      treeViews.wasm.replaceChildren(pre);
+      let ul = document.createElement("ul");
+      ul.appendChild(wasmCstView(trees.wasm.cst));
+      treeViews.wasm.replaceChildren(ul);
+      let button = document.createElement("button");
+      button.setAttribute('style', 'position: absolute; right: 10px; top: -2px;')
+      button.innerHTML = `View Source`;
+      button.setAttribute('popovertarget', 'wasm-source');
+      let dialog = document.createElement("dialog");
+      dialog.setAttribute('style', 'overflow: scroll; height: 80%; width: 80%;');
+      dialog.setAttribute('popover', '');
+      dialog.setAttribute('id', 'wasm-source');
+      dialog.innerHTML = `
+        <code><pre>${trees.wasm.source}</pre></code>
+      `
+      treeViews.wasm.appendChild(button);
+      treeViews.wasm.appendChild(dialog);
     } else {
       treeViews.wasm.replaceChildren();
     }
@@ -270,8 +281,9 @@ type Trees = {
   ast: AstIr,
   ir: AstIr | null,
   simple_ir: AstIr | null,
-  wasm: string | null
+  wasm: { cst: WasmCst, source: string } | null
 }
+
 
 type Cst = {
   key: number,
@@ -338,9 +350,8 @@ function astIrView(tree: AstIr): HTMLElement {
   function variable(
     tree: { name: string, type: string }
   ): string {
-    // <span class="type">${tree.type}</span>
     return `<div class="leaf">
-        <a class="variable" data-title=": ${tree.type}">${tree.name}</span>
+        <a class="variable" data-title=": ${tree.type}">${tree.name}</a>
       </div>`;
   }
   switch (tree.kind) {
@@ -403,6 +414,75 @@ function astIrView(tree: AstIr): HTMLElement {
         astIrView(tree.defn),
         astIrView(tree.body)
       ]);
+    }
+  }
+}
+type WasmCst = {
+  key: string,
+  text?: string,
+  children?: WasmCst[],
+}
+function wasmCstView(cst: WasmCst): HTMLElement {
+  switch (cst.key) {
+    case 'List': {
+      var children: WasmCst[] = cst.children ?? [];
+      if (children[0].key == 'Word') {
+        let tail = children.slice(1);
+        if (children[0].text == "func") {
+          console.log('tail', tail, cst);
+        }
+        return nested(children[0].text ?? "missing text" , tail.map(wasmCstView));
+      }
+      return nested('List', children.map(wasmCstView));
+    }
+    case 'Word': {
+      let li = document.createElement("li")!;
+      li.innerHTML = `
+        <div class="leaf">
+          ${cst.text}
+        </div>`;
+      return li;
+    }
+    case 'Var': {
+      let li = document.createElement("li")!;
+      li.innerHTML = `
+        <div class="leaf">
+          <span class="variable">${cst.text}</span>
+        </div>`;
+      return li;
+    }
+    case 'Number': {
+      let li = document.createElement("li");
+      li.innerHTML = `
+        <div class="leaf">
+          <span class="number">${cst.text}</span>
+        </div>`;
+      return li;
+    }
+    case 'StringLit': {
+      let li = document.createElement("li");
+      li.innerHTML = `
+        <div class="leaf">
+          <span class="string">${cst.text}</span>
+        </div>`;
+      return li;
+    }
+    case 'Comment': {
+      let li = document.createElement("li");
+      li.innerHTML = `
+        <div class="leaf">
+          <span class="comment">${cst.text}</span>
+        </div>`;
+      return li;
+    }
+    default: {
+      console.log('error', cst);
+      let li = document.createElement("li");
+      li.innerHTML = `
+        <div class="leaf">
+          <span class="error">"${cst.text}"</span>
+        </div>`;
+      return li;
     }
   }
 }

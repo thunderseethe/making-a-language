@@ -1,3 +1,5 @@
+use rowan::Language;
+
 use super::*;
 
 impl QueryContext {
@@ -35,14 +37,23 @@ impl QueryContext {
         let simple_ir = this
           .simple_ir_of(uri.clone())
           .map(|ir| ir_to_json(&mut printer, &ir_names, ir));
-        let wasm: Option<String> = this.wasm_of(uri.clone()).map(|wasm| {
-          let mut out = PrintHtmlWrite::default();
+        let wasm: Option<LSPAny> = this.wasm_of(uri.clone()).map(|wasm| {
+          let mut out = wasmprinter::PrintFmtWrite(String::new());
           wasmprinter::Config::new()
-            .fold_instructions(true)
-            .indent_text("  ")
+            .fold_instructions(false)
             .print(&wasm, &mut out)
             .expect("Failed to print wat from wasm");
-          out.into()
+          let mut html = PrintHtmlWrite::default();
+          wasmprinter::Config::new()
+              .fold_instructions(true)
+              .indent_text("    ")
+              .print(&wasm, &mut html)
+              .expect("Failed to print wat from wasm");
+          let parse = wasm_parser::parse(&out.0).syntax();
+          json!({
+            "cst": wasm_cst_to_json(parse),
+            "source": html.0
+          })
         });
 
         json!({
@@ -57,8 +68,8 @@ impl QueryContext {
   }
 }
 
-fn cst_to_json(nort: NodeOrToken<SyntaxNode<Lang>, SyntaxToken<Lang>>) -> LSPAny {
-  let kind: u64 = nort.kind() as u64;
+fn cst_to_json<L: Language>(nort: NodeOrToken<SyntaxNode<L>, SyntaxToken<L>>) -> LSPAny {
+  let kind: u64 = L::kind_to_raw(nort.kind()).0 as u64;
   let text_range: std::ops::Range<usize> = nort.text_range().into();
   json!({
     "key": kind,
@@ -71,6 +82,24 @@ fn cst_to_json(nort: NodeOrToken<SyntaxNode<Lang>, SyntaxToken<Lang>>) -> LSPAny
     } else {
       None
     }
+  })
+}
+
+fn wasm_cst_to_json(
+  nort: NodeOrToken<SyntaxNode<wasm_parser::Lang>, SyntaxToken<wasm_parser::Lang>>,
+) -> LSPAny {
+  fn is_trivia(
+    nort: &NodeOrToken<SyntaxNode<wasm_parser::Lang>, SyntaxToken<wasm_parser::Lang>>,
+  ) -> bool {
+    nort.kind() == wasm_parser::SyntaxKind::Whitespace
+      || nort.kind() == wasm_parser::SyntaxKind::LeftParen
+      || nort.kind() == wasm_parser::SyntaxKind::RightParen
+  }
+  let kind: String = format!("{:?}", nort.kind());
+  json!({
+    "key": kind,
+    "text": nort.as_token().map(|tok| tok.text()),
+    "children": nort.as_node().map(|node| node.children_with_tokens().filter(|nort| !is_trivia(nort)).map(wasm_cst_to_json).collect::<Vec<_>>()),
   })
 }
 
@@ -187,28 +216,127 @@ fn ast_to_json(printer: &mut PrettyprintType, ast: Ast<(String, TypedVar)>) -> L
   }
 }
 
-mod wasm_printer {
+#[derive(Default)]
+struct PrintHtmlWrite(String);
+impl From<PrintHtmlWrite> for String {
+  fn from(val: PrintHtmlWrite) -> Self {
+    val.0
+  }
+}
+impl wasmprinter::Print for PrintHtmlWrite {
+  fn write_str(&mut self, s: &str) -> std::io::Result<()> {
+    self.0.push_str(s);
+    Ok(())
+  }
+
+  fn start_literal(&mut self) -> std::io::Result<()> {
+    self.0.push_str("<span class=\"number\">");
+    Ok(())
+  }
+
+  fn start_name(&mut self) -> std::io::Result<()> {
+    self.0.push_str("<span class=\"variable\">");
+    Ok(())
+  }
+
+  fn start_keyword(&mut self) -> std::io::Result<()> {
+    self.0.push_str("<span class=\"keyword\">");
+    Ok(())
+  }
+
+  fn start_type(&mut self) -> std::io::Result<()> {
+    self.0.push_str("<span class=\"type\">");
+    Ok(())
+  }
+
+  fn start_comment(&mut self) -> std::io::Result<()> {
+    self.0.push_str("<span class=\"comment\">");
+    Ok(())
+  }
+
+  fn reset_color(&mut self) -> std::io::Result<()> {
+    self.0.push_str("</span>");
+    Ok(())
+  }
+
+  fn supports_async_color(&self) -> bool {
+    false
+  }
+
+  fn newline(&mut self) -> std::io::Result<()> {
+    self.write_str("\n")
+  }
+
+  fn start_line(&mut self, binary_offset: Option<usize>) {
+    let _ = binary_offset;
+  }
+
+  fn write_fmt(&mut self, args: std::fmt::Arguments<'_>) -> std::io::Result<()> {
+    struct Adapter<'a, T: ?Sized + 'a> {
+      inner: &'a mut T,
+      error: std::io::Result<()>,
+    }
+
+    impl<T: wasmprinter::Print + ?Sized> std::fmt::Write for Adapter<'_, T> {
+      fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        match self.inner.write_str(s) {
+          Ok(()) => Ok(()),
+          Err(e) => {
+            self.error = Err(e);
+            Err(std::fmt::Error)
+          }
+        }
+      }
+    }
+
+    let mut output = Adapter {
+      inner: self,
+      error: Ok(()),
+    };
+    match std::fmt::write(&mut output, args) {
+      Ok(()) => Ok(()),
+      Err(..) => output.error,
+    }
+  }
+
+  fn print_custom_section(
+    &mut self,
+    name: &str,
+    binary_offset: usize,
+    data: &[u8],
+  ) -> std::io::Result<bool> {
+    let _ = (name, binary_offset, data);
+    Ok(false)
+  }
+}
+
+mod wasm_parser {
   use logos::Logos;
 
   #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Logos)]
   #[repr(u16)]
-  enum SyntaxKind {
+  pub enum SyntaxKind {
     #[token("(")]
-    LeftParen = 0, // '('
+    LeftParen = 0,
     #[token(")")]
-    RightParen,    // ')'
-    #[regex("\\p{alpha}\\w*")]
-    Word,          // '+', '15'
+    RightParen,
+    #[regex("[_\\p{alpha}][\\._\\w]*")]
+    Word,
+    #[regex("\\$[_\\w]+")]
+    Var,
     #[regex("\\s+")]
-    Whitespace,    // whitespaces is explicit
+    Whitespace,
     #[regex("\\d+")]
     Number,
-    Error,         // as well as errors
+    Error,
 
     // composite nodes
-    List, // `(+ 2 3)`
-    Atom, // `+`, `15`, wraps a WORD token
-    Root, // top-level node: a list of s-expressions
+    List,
+    #[regex("\\(;[^;\\)]*;\\)")]
+    Comment,
+    #[regex("\"[^\"]*\"")]
+    StringLit,
+    Root,
   }
   use SyntaxKind::*;
 
@@ -219,7 +347,7 @@ mod wasm_printer {
   }
 
   #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-  enum Lang {}
+  pub enum Lang {}
   impl rowan::Language for Lang {
     type Kind = SyntaxKind;
     fn kind_from_raw(raw: rowan::SyntaxKind) -> Self::Kind {
@@ -231,81 +359,52 @@ mod wasm_printer {
     }
   }
 
-  /// GreenNode is an immutable tree, which is cheap to change,
-  /// but doesn't contain offsets and parent pointers.
   use rowan::GreenNode;
 
-  /// You can construct GreenNodes by hand, but a builder
-  /// is helpful for top-down parsers: it maintains a stack
-  /// of currently in-progress nodes
   use rowan::GreenNodeBuilder;
 
-  /// The parse results are stored as a "green tree".
-  /// We'll discuss working with the results later
-  struct Parse {
-    green_node: GreenNode,
+  pub struct Parse {
+    pub green_node: GreenNode,
     #[allow(unused)]
     errors: Vec<String>,
   }
 
-  /// Now, let's write a parser.
-  /// Note that `parse` does not return a `Result`:
-  /// by design, syntax tree can be built even for
-  /// completely invalid source code.
-  fn parse(text: &str) -> Parse {
+  pub fn parse(text: &str) -> Parse {
     struct Parser<'a> {
-      tokens: std::iter::Peekable<logos::Lexer<'a, SyntaxKind>>,
+      tokens: std::iter::Peekable<logos::SpannedIter<'a, SyntaxKind>>,
       content: &'a str,
-      /// the in-progress tree.
       builder: GreenNodeBuilder<'static>,
-      /// the list of syntax errors we've accumulated
-      /// so far.
       errors: Vec<String>,
     }
 
-    /// The outcome of parsing a single S-expression
     enum SexpRes {
-      /// An S-expression (i.e. an atom, or a list) was successfully parsed
       Ok,
-      /// Nothing was parsed, as no significant tokens remained
       Eof,
-      /// An unexpected ')' was found
       RParen,
     }
 
-    impl Parser {
+    impl<'a> Parser<'a> {
       fn parse(mut self) -> Parse {
-        // Make sure that the root node covers all source
-        self.builder.start_node(Root.into());
-        // Parse zero or more S-expressions
-        loop {
-          match self.sexp() {
-            SexpRes::Eof => break,
-            SexpRes::RParen => {
-              self.builder.start_node(Error.into());
-              self.errors.push("unmatched `)`".to_string());
-              self.bump(); // be sure to chug along in case of error
-              self.builder.finish_node();
-            }
-            SexpRes::Ok => (),
+        match self.sexp() {
+          SexpRes::Eof => (),
+          SexpRes::RParen => {
+            self.builder.start_node(Error.into());
+            self.errors.push("unmatched `)`".to_string());
+            self.bump(); // be sure to chug along in case of error
+            self.builder.finish_node();
           }
+          SexpRes::Ok => (),
         }
-        // Don't forget to eat *trailing* whitespace
-        self.skip_ws();
-        // Close the root node.
-        self.builder.finish_node();
 
-        // Turn the builder into a GreenNode
         Parse {
           green_node: self.builder.finish(),
           errors: self.errors,
         }
       }
+
       fn list(&mut self) {
-        assert_eq!(self.current(), Some(LeftParen));
-        // Start the list node
         self.builder.start_node(List.into());
-        self.bump(); // '('
+        self.bump();
         loop {
           match self.sexp() {
             SexpRes::Eof => {
@@ -319,15 +418,11 @@ mod wasm_printer {
             SexpRes::Ok => (),
           }
         }
-        // close the list node
         self.builder.finish_node();
       }
 
       fn sexp(&mut self) -> SexpRes {
-        // Eat leading whitespace
         self.skip_ws();
-        // Either a list, an atom, a closing paren,
-        // or an eof.
         let t = match self.current() {
           None => return SexpRes::Eof,
           Some(RightParen) => return SexpRes::RParen,
@@ -335,25 +430,28 @@ mod wasm_printer {
         };
         match t {
           LeftParen => self.list(),
-          Word => {
-            self.builder.start_node(Atom.into());
+          Word | Var | Number | StringLit | Comment | Error => {
             self.bump();
-            self.builder.finish_node();
           }
-          Error => self.bump(),
-          _ => unreachable!(),
+          t => unreachable!("{t:?}"),
         }
         SexpRes::Ok
       }
-      /// Advance one token, adding it to the current branch of the tree builder.
+
       fn bump(&mut self) {
-        let (kind, text) = self.tokens.pop().unwrap();
-        self.builder.token(kind.into(), text.as_str());
+        let (kind, text) = self.tokens.next().unwrap();
+        self
+          .builder
+          .token(kind.unwrap_or(Error).into(), &self.content[text]);
       }
-      /// Peek at the first unprocessed token
-      fn current(&self) -> Option<SyntaxKind> {
-        self.tokens.last().map(|(kind, _)| *kind)
+
+      fn current(&mut self) -> Option<SyntaxKind> {
+        self
+          .tokens
+          .peek()
+          .map(|(kind, _)| kind.unwrap_or(Error).into())
       }
+
       fn skip_ws(&mut self) {
         while self.current() == Some(Whitespace) {
           self.bump()
@@ -361,7 +459,7 @@ mod wasm_printer {
       }
     }
 
-    let tokens = SyntaxKind::lexer(text);
+    let tokens = SyntaxKind::lexer(text).spanned().peekable();
     Parser {
       tokens: tokens,
       content: text,
@@ -370,12 +468,6 @@ mod wasm_printer {
     }
     .parse()
   }
-
-  /// To work with the parse results we need a view into the
-  /// green tree - the Syntax tree.
-  /// It is also immutable, like a GreenNode,
-  /// but it contains parent pointers, offsets, and
-  /// has identity semantics.
 
   type SyntaxNode = rowan::SyntaxNode<Lang>;
 
@@ -386,8 +478,9 @@ mod wasm_printer {
   type SyntaxElement = rowan::NodeOrToken<SyntaxNode, SyntaxToken>;
 
   impl Parse {
-    fn syntax(&self) -> SyntaxNode {
-      SyntaxNode::new_root(self.green_node.clone())
+    pub fn syntax(self) -> SyntaxElement {
+      let root = SyntaxNode::new_root(self.green_node);
+      rowan::NodeOrToken::Node(root)
     }
   }
 }

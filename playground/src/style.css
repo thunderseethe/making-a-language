@@ -134,6 +134,9 @@ main {
   .variable {
     color: color-mix(in srgb, var(--fg-color) 50%, var(--acc-color));
   }
+  .comment {
+    font-style: italic;
+  }
   a.variable[data-title]:hover::after {
     content: attr(data-title);
     position: absolute;
