@@ -40,7 +40,7 @@ impl QueryContext {
         let wasm: Option<LSPAny> = this.wasm_of(uri.clone()).map(|wasm| {
           let mut out = wasmprinter::PrintFmtWrite(String::new());
           wasmprinter::Config::new()
-            .fold_instructions(false)
+            .fold_instructions(true)
             .print(&wasm, &mut out)
             .expect("Failed to print wat from wasm");
           let mut html = PrintHtmlWrite::default();
