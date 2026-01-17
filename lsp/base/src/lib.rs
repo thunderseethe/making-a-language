@@ -31,9 +31,7 @@ use wasm_bindgen::prelude::*;
 use wasm_streams::{ReadableStream, WritableStream};
 
 mod queries;
-use queries::{Database, graph::DepGraph};
-
-use self::queries::QueryContext;
+use queries::{QueryContext, Database, graph::DepGraph};
 
 pub enum CompilerError {
   Desugar(DesugarError),
@@ -156,8 +154,6 @@ pub async fn lsp(config: ServerIo) -> std::result::Result<(), JsValue> {
 #[derive(Debug)]
 struct PellucidLsp {
   client: Client,
-  // We only support a single document right now, so we don't need more complicated handling than
-  // this.
   database: Arc<Database>,
   dep_graph: Arc<DepGraph>,
 }
@@ -202,9 +198,16 @@ impl LanguageServer for PellucidLsp {
   }
 
   async fn did_open(&self, params: DidOpenTextDocumentParams) {
+    let uri = params.text_document.uri;
     self
       .database
-      .set_input(params.text_document.uri, params.text_document.text);
+      .set_content(uri.clone(), params.text_document.text);
+    let ctx = self.root_query_context();
+    let diags = ctx.diagnostics_of(uri.clone());
+    self
+      .client
+      .publish_diagnostics(uri, diags, Some(params.text_document.version))
+      .await;
   }
 
   async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -229,8 +232,8 @@ impl LanguageServer for PellucidLsp {
         content = change.text
       }
     }
-    self.database.set_input(uri.clone(), content);
-    let diags = ctx.diagnostics(uri.clone());
+    self.database.set_content(uri.clone(), content);
+    let diags = ctx.diagnostics_of(uri.clone());
     self
       .client
       .publish_diagnostics(uri, diags, Some(params.text_document.version))
@@ -242,7 +245,7 @@ impl LanguageServer for PellucidLsp {
     params: tower_lsp_server::lsp_types::DocumentDiagnosticParams,
   ) -> Result<DocumentDiagnosticReportResult> {
     let ctx = self.root_query_context();
-    let diags = ctx.diagnostics(params.text_document.uri);
+    let diags = ctx.diagnostics_of(params.text_document.uri);
     if diags.is_empty() {
       return Ok(DocumentDiagnosticReportResult::Report(
         RelatedUnchangedDocumentDiagnosticReport {
@@ -291,8 +294,7 @@ impl LanguageServer for PellucidLsp {
     let uri = params.text_document_position.text_document.uri;
     let cursor = params.text_document_position.position;
 
-    let locs = ctx.reference_at(uri, cursor);
-    Ok(locs)
+    Ok(ctx.references_of(uri, cursor))
   }
 
   async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
@@ -301,8 +303,7 @@ impl LanguageServer for PellucidLsp {
     let cursor = params.text_document_position.position;
     let new_name = params.new_name;
 
-    Ok(ctx.reference_at(uri, cursor).map(|locs| {
-      #[allow(clippy::mutable_key_type)]
+    let edits = ctx.references_of(uri, cursor).map(|locs| {
       let mut changes = HashMap::default();
       for loc in locs {
         let edits = changes.entry(loc.uri).or_insert(vec![]);
@@ -315,17 +316,15 @@ impl LanguageServer for PellucidLsp {
         changes: Some(changes),
         ..Default::default()
       }
-    }))
+    });
+    Ok(edits)
   }
 
   async fn hover(&self, params: HoverParams) -> Result<Option<tower_lsp_server::lsp_types::Hover>> {
     let uri = params.text_document_position_params.text_document.uri;
     let position = params.text_document_position_params.position;
     let ctx = self.root_query_context();
-    let Some(sync_node) = ctx.syntax_node_starting_at(uri.clone(), position) else {
-      return Ok(None);
-    };
-    Ok(ctx.hover_of(uri.clone(), sync_node.clone()))
+    Ok(ctx.hover_of(uri, position))
   }
 
   async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {

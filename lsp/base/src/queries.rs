@@ -24,7 +24,7 @@ use tower_lsp_server::lsp_types::{
 use types_base::{Ast, NodeId, Type, TypeError, TypeScheme, TypedVar, Var};
 
 use self::graph::DepGraph;
-use self::prettyprint::{PrettyprintType, prettyprint_ty};
+use self::prettyprint::{PrettyprintType, prettyprint_expected_syntax, prettyprint_ty};
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 enum Color {
@@ -97,19 +97,20 @@ pub(crate) enum QueryKey {
   DesugarOf(Uri),
   NameresolveOf(Uri),
   TypesOf(Uri),
-  AstNodeOf(Uri, SyntaxNodeHandle),
-  HoverOf(Uri, SyntaxNodeHandle),
-  NodeStartingAt(Uri, Position),
-  ScopeOf(Uri, Position),
-  CompletionOf(Uri, Position),
-  DefinitionOf(Uri, Position),
-  ReferenceOf(Uri, Position),
-  ShowTreesOf(Uri),
   IrOf(Uri),
   SimpleIrOf(Uri),
   MonomorphOf(Uri),
   ClosureConvertOf(Uri),
   WasmOf(Uri),
+  DiagnosticsOf(Uri),
+  NodeStartingAt(Uri, Position),
+  AstNodeOf(Uri, SyntaxNodeHandle),
+  HoverOf(Uri, Position),
+  ScopeOf(Uri, Position),
+  CompletionOf(Uri, Position),
+  DefinitionOf(Uri, Position),
+  ReferencesOf(Uri, Position),
+  ShowTreesOf(Uri),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,6 +155,7 @@ pub struct PellucidNameResError {
 #[derive(Default, Debug)]
 pub struct Database {
   colors: ColorMap,
+  revision: AtomicUsize,
   // Query caches
   content_input: DashMap<QueryKey, String>,
   cst_query: DashMap<QueryKey, (Cst, Vec<PellucidError>)>,
@@ -161,6 +163,12 @@ pub struct Database {
   desugar_query: DashMap<QueryKey, DesugarOfResult>,
   nameresolve_query: DashMap<QueryKey, NameresOfResult>,
   types_query: DashMap<QueryKey, TypesOfResult>,
+  ir_query: DashMap<QueryKey, Option<LowerOut>>,
+  simple_ir_query: DashMap<QueryKey, Option<lowering_base::IR>>,
+  monomorph_query: DashMap<QueryKey, Option<lowering_base::IR>>,
+  closure_convert_query: DashMap<QueryKey, Option<closure_convert_base::ClosureConvertOutput>>,
+  wasm_query: DashMap<QueryKey, Option<Vec<u8>>>,
+  diagnostics_query: DashMap<QueryKey, Vec<Diagnostic>>,
   ast_node_query: DashMap<QueryKey, Option<Ast<TypedVar>>>,
   hover_query: DashMap<QueryKey, Option<Hover>>,
   node_starting_at_query: DashMap<QueryKey, Option<SyntaxNodeHandle>>,
@@ -169,16 +177,10 @@ pub struct Database {
   reference_query: DashMap<QueryKey, Option<Vec<Location>>>,
   scope_query: DashMap<QueryKey, Option<HashMap<String, String>>>,
   show_trees_query: DashMap<QueryKey, LSPAny>,
-  ir_query: DashMap<QueryKey, Option<LowerOut>>,
-  simple_ir_query: DashMap<QueryKey, Option<lowering_base::IR>>,
-  monomorph_query: DashMap<QueryKey, Option<lowering_base::IR>>,
-  closure_convert_query: DashMap<QueryKey, Option<closure_convert_base::ClosureConvertOutput>>,
-  wasm_query: DashMap<QueryKey, Option<Vec<u8>>>,
-  revision: AtomicUsize,
 }
 
 impl Database {
-  pub fn set_input(&self, uri: Uri, content: String) {
+  pub fn set_content(&self, uri: Uri, content: String) {
     let key = QueryKey::ContentOf(uri);
     self.content_input.insert(key.clone(), content);
     let old_revision = self.revision.fetch_add(1, Ordering::SeqCst);
@@ -265,10 +267,6 @@ impl QueryContext {
     }
   }
 
-  fn dependencies(&self, key: &QueryKey) -> Option<Vec<QueryKey>> {
-    self.dep_graph.dependencies(key)
-  }
-
   fn run_query(&self, key: QueryKey) {
     match key {
       QueryKey::ContentOf(_) => { /* this is input query, so running it does nothing. */ }
@@ -302,8 +300,8 @@ impl QueryContext {
       QueryKey::DefinitionOf(uri, cursor) => {
         let _ = self.definition_of(uri, cursor);
       }
-      QueryKey::ReferenceOf(uri, cursor) => {
-        let _ = self.reference_at(uri, cursor);
+      QueryKey::ReferencesOf(uri, cursor) => {
+        let _ = self.references_of(uri, cursor);
       }
       QueryKey::ScopeOf(uri, cursor) => {
         let _ = self.scope_at(uri, cursor);
@@ -326,13 +324,16 @@ impl QueryContext {
       QueryKey::WasmOf(uri) => {
         let _ = self.wasm_of(uri);
       }
+      QueryKey::DiagnosticsOf(uri) => {
+        let _ = self.diagnostics_of(uri);
+      }
     }
   }
 
   fn try_mark_green(&self, key: QueryKey) -> Color {
     let revision = self.db.revision.load(Ordering::SeqCst);
     // If we have no dependencies in the graph, assume we need to run the query.
-    let Some(deps) = self.dependencies(&key) else {
+    let Some(deps) = self.dep_graph.dependencies(&key) else {
       return Color::Red;
     };
     for dep in deps {
@@ -352,7 +353,7 @@ impl QueryContext {
         }
       }
     }
-    // if we marked all dependencies green, mark this node green
+    // If we marked all dependencies green, mark this node green.
     self.db.colors.mark_green(key, revision);
     Color::Green
   }
@@ -363,16 +364,6 @@ impl QueryContext {
     cache: &DashMap<QueryKey, V>,
     producer: impl FnOnce(&Self, &QueryKey) -> V,
   ) -> V {
-    let Some((_, rev)) = self.db.colors.get(&key) else {
-      // We have not yet run this query, so we must run it.
-      let value = producer(self, &key);
-      cache.insert(key.clone(), value.clone());
-      self
-        .db
-        .colors
-        .mark_red(key, self.db.revision.load(Ordering::SeqCst));
-      return value;
-    };
     let revision = self.db.revision.load(Ordering::SeqCst);
     let update_value = |key: QueryKey| {
       if let Some(parent) = &self.parent {
@@ -387,11 +378,15 @@ impl QueryContext {
         &key,
       );
       let old = cache.insert(key.clone(), value.clone());
-      match old {
-        Some(old) if old == value => self.db.colors.mark_green(key, revision),
-        _ => self.db.colors.mark_red(key, revision),
-      };
+      if old.is_some_and(|old| old == value) {
+        self.db.colors.mark_green(key, revision);
+      } else {
+        self.db.colors.mark_red(key, revision);
+      }
       value
+    };
+    let Some((_, rev)) = self.db.colors.get(&key) else {
+      return update_value(key);
     };
     // Our query is outdated
     if rev < revision {
@@ -426,10 +421,14 @@ pub enum PellucidError {
 // Public queries
 impl QueryContext {
   pub fn content_of(&self, uri: Uri) -> String {
-    self.db.colors.mark_green(
-      QueryKey::ContentOf(uri.clone()),
-      self.db.revision.load(Ordering::SeqCst),
-    );
+    let key = QueryKey::ContentOf(uri.clone());
+    if let Some(parent) = &self.parent {
+      self.dep_graph.add_dependency(parent.clone(), key.clone());
+    }
+    self
+      .db
+      .colors
+      .mark_green(key, self.db.revision.load(Ordering::SeqCst));
     self
       .db
       .content_input
@@ -474,17 +473,21 @@ impl QueryContext {
         let QueryKey::DesugarOf(uri) = key else {
           unreachable!("desugar")
         };
-        let (cst, mut errors) = this.cst_of(uri.clone());
+        let (cst, _) = this.cst_of(uri.clone());
         let out = desugar_base::desugar(cst.clone());
-        errors.extend(out.errors.into_iter().map(|(ptr, kind)| {
-          PellucidError::Desugar(PellucidDesugarError {
-            kind,
-            node: SyntaxNodeHandle {
-              root: cst.clone(),
-              ptr,
-            },
+        let errors = out
+          .errors
+          .into_iter()
+          .map(|(ptr, kind)| {
+            PellucidError::Desugar(PellucidDesugarError {
+              kind,
+              node: SyntaxNodeHandle {
+                root: cst.clone(),
+                ptr,
+              },
+            })
           })
-        }));
+          .collect();
         DesugarOfResult {
           ast: out.ast,
           ast_to_cst: out.ast_to_cst,
@@ -504,13 +507,11 @@ impl QueryContext {
         };
         let desugar = this.desugar_of(uri.clone());
         let nameres = name_resolution_base::name_resolution(desugar.ast);
-        let mut errors = desugar.errors;
-        errors.extend(
-          nameres
-            .errors
-            .into_iter()
-            .map(|(node, kind)| PellucidError::Nameres(PellucidNameResError { node, kind })),
-        );
+        let errors = nameres
+          .errors
+          .into_iter()
+          .map(|(node, kind)| PellucidError::Nameres(PellucidNameResError { node, kind }))
+          .collect();
         NameresOfResult {
           ast: nameres.ast,
           names: nameres.names,
@@ -530,13 +531,11 @@ impl QueryContext {
         };
         let nameres = this.nameresolve_of(uri.clone());
         let out = types_base::type_infer(nameres.ast);
-        let mut errors = nameres.errors;
-        errors.extend(
-          out
-            .errors
-            .into_iter()
-            .map(|(node, mark)| PellucidError::Types(PellucidTypeError { node, mark })),
-        );
+        let errors = out
+          .errors
+          .into_iter()
+          .map(|(node, mark)| PellucidError::Types(PellucidTypeError { node, mark }))
+          .collect();
         TypesOfResult {
           ast: out.ast,
           scheme: out.scheme,
@@ -570,13 +569,15 @@ impl QueryContext {
     self.query(
       QueryKey::DefinitionOf(uri.clone(), cursor),
       &self.db.definition_query,
-      |this, _key| {
-        let syntax = this.syntax_node_starting_at(uri.clone(), cursor)?;
+      |this, key| {
+        let QueryKey::DefinitionOf(uri, cursor) = key else {
+          unreachable!();
+        };
+        let syntax = this.syntax_node_starting_at(uri.clone(), cursor.clone())?;
         let ast_node = this.ast_node_of(uri.clone(), syntax)?;
         let Ast::Var(node_id, var) = ast_node else {
           return None;
         };
-        let ast_to_cst = this.desugar_of(uri.clone()).ast_to_cst;
         let ast = this.nameresolve_of(uri.clone()).ast;
         let binder_id = ast
           .parents_of(node_id)?
@@ -585,70 +586,62 @@ impl QueryContext {
             Ast::Fun(node_id, bind, _) if bind == &var.0 => Some(node_id),
             _ => None,
           })?;
-        let binder_node = ast_to_cst.get(binder_id).or_else(|| {
-          // If our variable is bound by a let and not a function we need the app node to get our
-          // cst node.
-          let parent = ast.parent_of(*binder_id)?;
-          ast_to_cst.get(&parent.id())
-        })?;
+        let ast_to_cst = this.desugar_of(uri.clone()).ast_to_cst;
+        let binder_node = ast_to_cst.get(binder_id)?;
         let root = SyntaxNode::new_root(binder_node.root.clone());
         let syntax = binder_node.ptr.to_node(&root);
-        let binder = syntax
-          .first_child_by_kind(&|kind| kind == Syntax::FunBinder || kind == Syntax::LetBinder)?;
+        let mut binder = syntax;
+        if binder.kind() == Syntax::Fun {
+          binder = binder.first_child_by_kind(&|kind| kind == Syntax::FunBinder)?;
+        }
+
         let range_node = binder.first_token()?;
-
-        let newlines = this.newlines_of(uri);
-
+        let newlines = this.newlines_of(uri.clone());
         let range = newlines.lsp_range_for(range_node.text_range().into())?;
         Some(range)
       },
     )
   }
 
-  pub fn reference_at(&self, uri: Uri, cursor: Position) -> Option<Vec<Location>> {
+  pub fn references_of(&self, uri: Uri, cursor: Position) -> Option<Vec<Location>> {
     self.query(
-      QueryKey::ReferenceOf(uri.clone(), cursor),
+      QueryKey::ReferencesOf(uri.clone(), cursor),
       &self.db.reference_query,
-      |this, _| {
-        let sync_node = this.syntax_node_starting_at(uri.clone(), cursor)?;
+      |this, key| {
+        let QueryKey::ReferencesOf(uri, cursor) = key else {
+          unreachable!()
+        };
+        let sync_node = this.syntax_node_starting_at(uri.clone(), cursor.clone())?;
         let ast_node = this.ast_node_of(uri.clone(), sync_node)?;
         let var = match ast_node {
           Ast::Var(_, var) | Ast::Fun(_, var, _) => var,
           _ => return None,
         };
-        let ast_to_cst = self.desugar_of(uri.clone()).ast_to_cst;
-        let ast = self.nameresolve_of(uri.clone()).ast;
 
-        let newlines = self.newlines_of(uri.clone());
+        let ast = self.nameresolve_of(uri.clone()).ast;
         let vars = ast.var_reference(&var.0);
-        Some(
-          vars
-            .into_iter()
-            .filter_map(|var| {
-              let id = var.id();
-              let sync_node = ast_to_cst.get(&id).or_else(|| {
-                let Ast::Fun(_, _, _) = var else {
-                  return None;
-                };
-                let parent_id = ast.parent_of(id)?.id();
-                ast_to_cst.get(&parent_id)
-              })?;
-              let root = SyntaxNode::new_root(sync_node.root.clone());
-              let mut syntax = sync_node.ptr.to_node(&root);
-              if [Syntax::Fun, Syntax::Let].contains(&syntax.kind()) {
-                syntax = syntax.first_child_by_kind(&|kind| {
-                  [Syntax::LetBinder, Syntax::FunBinder].contains(&kind)
-                })?;
-              }
-              let token = syntax.first_token()?;
-              let range = newlines.lsp_range_for(token.text_range().into())?;
-              Some(Location {
-                uri: uri.clone(),
-                range,
-              })
+
+        let ast_to_cst = self.desugar_of(uri.clone()).ast_to_cst;
+        let newlines = self.newlines_of(uri.clone());
+        let references = vars
+          .into_iter()
+          .filter_map(|var| {
+            let id = var.id();
+            let sync_node = ast_to_cst.get(&id)?;
+            let root = SyntaxNode::new_root(sync_node.root.clone());
+            let mut syntax = sync_node.ptr.to_node(&root);
+            if syntax.kind() == Syntax::Fun {
+              syntax = syntax.first_child_by_kind(&|kind| kind == Syntax::FunBinder)?;
+            }
+            let token = syntax.first_token()?;
+            let range = newlines.lsp_range_for(token.text_range().into())?;
+            Some(Location {
+              uri: uri.clone(),
+              range,
             })
-            .collect(),
-        )
+          })
+          .collect();
+        Some(references)
       },
     )
   }
@@ -692,14 +685,15 @@ impl QueryContext {
     )
   }
 
-  pub fn hover_of(&self, uri: Uri, node: SyntaxNodeHandle) -> Option<Hover> {
+  pub fn hover_of(&self, uri: Uri, position: Position) -> Option<Hover> {
     self.query(
-      QueryKey::HoverOf(uri, node),
+      QueryKey::HoverOf(uri, position),
       &self.db.hover_query,
       |this, key| {
-        let QueryKey::HoverOf(uri, cst) = key else {
+        let QueryKey::HoverOf(uri, position) = key else {
           unreachable!("hover")
         };
+        let cst = this.syntax_node_starting_at(uri.clone(), position.clone())?;
         let syntax = SyntaxNode::<Lang>::new_root(cst.root.clone());
         // We'll need this later to get the correct range for our hover, so we don't want to shadow
         // it.
@@ -708,9 +702,8 @@ impl QueryContext {
         // We only want to show a hover if our cursor is over a variable, either in expression or
         // bound position.
         let node = match cursor_node.kind() {
-          Syntax::Var => cursor_node.clone(),
+          Syntax::Var | Syntax::LetBinder => cursor_node.clone(),
           Syntax::FunBinder => cursor_node.parent()?,
-          Syntax::LetBinder => cursor_node.parent()?,
           _ => return None,
         };
 
@@ -724,11 +717,6 @@ impl QueryContext {
         let ty = match &ast_node {
           Ast::Var(_, typed_var) => &typed_var.1,
           Ast::Fun(_, typed_var, _) => &typed_var.1,
-          // If we hover over a let binding, our ast node will be App(_, Fun(...), ...).
-          Ast::App(_, fun, _) => match fun.as_ref() {
-            Ast::Fun(_, typed_var, _) => &typed_var.1,
-            _ => return None,
-          },
           _ => return None,
         };
         let newlines = self.newlines_of(uri.clone());
@@ -736,7 +724,7 @@ impl QueryContext {
         Some(Hover {
           range,
           contents: HoverContents::Scalar(MarkedString::LanguageString(LanguageString {
-            language: "haskell".to_string(),
+            language: "pellucid".to_string(),
             value: prettyprint_ty(ty),
           })),
         })
@@ -752,61 +740,14 @@ impl QueryContext {
         let QueryKey::ScopeOf(uri, cursor) = key else {
           unreachable!()
         };
+
+        let node = this.syntax_node_starting_at(uri.clone(), cursor.clone())?;
+
+        let ast_node = this.ast_node_of(uri.clone(), node)?;
+
         let desugar = this.desugar_of(uri.clone());
         let types = this.types_of(uri.clone());
-        fn zip_ast(left: Ast<String>, right: Ast<TypedVar>) -> Ast<(String, TypedVar)> {
-          match (left, right) {
-            (Ast::Var(left_id, a), Ast::Var(right_id, b)) if left_id == right_id => {
-              Ast::Var(left_id, (a, b))
-            }
-            // After desugaring, the only way we introdue a new hole is when we fail to resolve a
-            // name, so we handle that case explicilty here.
-            (Ast::Var(left_id, a), Ast::Hole(right_id, b)) if left_id == right_id => {
-              Ast::Hole(left_id, (a, b))
-            }
-            (Ast::Int(left_id, a), Ast::Int(right_id, _)) if left_id == right_id => {
-              Ast::Int(left_id, a)
-            }
-            (Ast::Fun(left_id, a_var, a_body), Ast::Fun(right_id, b_var, b_body))
-              if left_id == right_id =>
-            {
-              let body = zip_ast(*a_body, *b_body);
-              Ast::fun(left_id, (a_var, b_var), body)
-            }
-            (Ast::App(left_id, a_fun, a_arg), Ast::App(right_id, b_fun, b_arg))
-              if left_id == right_id =>
-            {
-              let fun = zip_ast(*a_fun, *b_fun);
-              let arg = zip_ast(*a_arg, *b_arg);
-              Ast::app(left_id, fun, arg)
-            }
-            (Ast::Hole(left_id, a_hole), Ast::Hole(right_id, b_hole)) if left_id == right_id => {
-              Ast::Hole(left_id, (a_hole, b_hole))
-            }
-            // Outside of our one case with Var, we should not see two different Ast nodes meet or
-            // an Ast node meet a Hole, so we error if that does arise.
-            (left, right) => unreachable!("{left:?} does not zip with {right:?}"),
-          }
-        }
         let scoped_ast = zip_ast(desugar.ast, types.ast);
-        let (root, _) = this.cst_of(uri.clone());
-        let cst = SyntaxNode::<Lang>::new_root(root.clone());
-        let newlines = this.newlines_of(uri.clone());
-
-        let offset: u32 = newlines
-          .byte_of(cursor.line, cursor.character)?
-          .try_into()
-          .unwrap();
-        let token = cst.token_at_offset(offset.into()).left_biased()?;
-        let node = token.parent()?;
-        let ast_node = this.ast_node_of(
-          uri.clone(),
-          SyntaxNodeHandle {
-            root,
-            ptr: SyntaxNodePtr::new(&node),
-          },
-        )?;
-        // TODO: Write this method.
         let Some(parents) = scoped_ast.parents_of(ast_node.id()) else {
           return Some(HashMap::default());
         };
@@ -840,7 +781,6 @@ impl QueryContext {
           .into_iter()
           .collect::<Vec<_>>();
 
-        // TODO: We should add keywords here.
         Some(CompletionResponse::Array(
           scope
             .into_iter()
@@ -856,103 +796,127 @@ impl QueryContext {
     )
   }
 
-  pub fn diagnostics(&self, uri: Uri) -> Vec<Diagnostic> {
-    // TODO: We should produce multiple diagnostics here.
+  pub fn diagnostics_of(&self, uri: Uri) -> Vec<Diagnostic> {
+    self.query(
+      QueryKey::DiagnosticsOf(uri),
+      &self.db.diagnostics_query,
+      |this, key| {
+        let QueryKey::DiagnosticsOf(uri) = key else {
+            unreachable!()
+        };
+        let newlines = this.newlines_of(uri.clone());
+        this
+          .errors(uri.clone())
+          .map(|err| match err {
+            PellucidError::Parser(err) => Diagnostic::new_simple(
+              newlines
+                .lsp_range_for(err.span)
+                .expect("error span outside range"),
+              format!(
+                "parse: Expected one of: {}",
+                prettyprint_expected_syntax(&err.expected)
+              ),
+            ),
+            PellucidError::Desugar(desugar) => Diagnostic::new_simple(
+              newlines
+                .lsp_range_for(desugar.node.ptr.text_range().into())
+                .expect("error span outside range"),
+              match desugar.kind {
+                DesugarError::MissingSyntax(node) => format!("desugar: Expected node {node:?}"),
+                DesugarError::LetMissingBinding => "desugar: Let missing a variable".to_string(),
+                DesugarError::LetMissingExpr => "desugar: Let missing a rhs expr".to_string(),
+                DesugarError::InvalidInt(_) => "desugar: Expected an integer".to_string(),
+                DesugarError::FunMissingBinding => {
+                  "desugar: Function missing a parameter".to_string()
+                }
+                DesugarError::FunMissingExpr => "desugar: Function missing a body".to_string(),
+                DesugarError::VarMissingIdentifier => {
+                  "desugar: Expected variable to contain an identifier token".to_string()
+                }
+                DesugarError::IntegerExprMissingInt => {
+                  "desugar: Expected integer expr to contain an int token".to_string()
+                }
+                DesugarError::ApplicationMissingFun => {
+                  "desugar: Application is missing a function".to_string()
+                }
+                DesugarError::ApplicationMissingArg => {
+                  "desugar: Applicaiton is missing a argument".to_string()
+                }
+                DesugarError::ExprMissingBody => {
+                  "desugar: Expected expression to have a body after let bindings.".to_string()
+                }
+                DesugarError::UnexpectedAtom(kind) => {
+                  format!("desugar: Expecting an atom but found syntax {kind:?}.")
+                }
+              },
+            ),
+            PellucidError::Nameres(nameres) => {
+              let desugar = this.desugar_of(uri.clone());
+              let node_id = nameres.node;
+              let var = match nameres.kind {
+                NameResolutionError::UndefinedVar(_, var) => var,
+              };
+              Diagnostic::new_simple(
+                newlines
+                  .lsp_range_for(desugar.ast_to_cst[&node_id].ptr.text_range().into())
+                  .expect("error span outside range"),
+                format!("namres: Undefined variable {var}"),
+              )
+            }
+            PellucidError::Types(types) => {
+              let desugar = this.desugar_of(uri.clone());
+              let range = newlines
+                .lsp_range_for(desugar.ast_to_cst[&types.node].ptr.text_range().into())
+                .expect("error span outside range");
+
+              Diagnostic::new_simple(
+                range,
+                match types.mark {
+                  TypeError::InfiniteType { type_var, ty } => format!(
+                    "types: Tried to solve variable {} to infinite type {}",
+                    prettyprint_ty(&Type::Var(type_var)),
+                    prettyprint_ty(&ty)
+                  ),
+                  TypeError::UnexpectedFun {
+                    expected_ty,
+                    fun_ty,
+                  } => format!(
+                    "types: Expected a value of type {}, but found function of type {}",
+                    prettyprint_ty(&expected_ty),
+                    prettyprint_ty(&fun_ty)
+                  ),
+                  TypeError::AppExpectedFun {
+                    inferred_ty,
+                    expected_fun_ty,
+                  } => format!(
+                    "types: Expected this to be a function {} but it has type {}",
+                    prettyprint_ty(&expected_fun_ty),
+                    prettyprint_ty(&inferred_ty)
+                  ),
+                  TypeError::ExpectedUnify { checked, inferred } => format!(
+                    "types: Tried to check this as type {} but it's inferred to have type {}",
+                    prettyprint_ty(&checked),
+                    prettyprint_ty(&inferred)
+                  ),
+                },
+              )
+            }
+          })
+          .collect()
+      })
+  }
+
+  pub fn errors(&self, uri: Uri) -> impl Iterator<Item = PellucidError> {
     let types = self.types_of(uri.clone());
-    if types.errors.is_empty() {
-      return vec![];
-    }
-    let newlines = self.newlines_of(uri.clone());
+    let nameres = self.nameresolve_of(uri.clone());
+    let desugar = self.desugar_of(uri.clone());
+    let (_, parse_errors) = self.cst_of(uri.clone());
     types
       .errors
       .into_iter()
-      .map(|err| match err {
-        PellucidError::Parser(err) => Diagnostic::new_simple(
-          newlines
-            .lsp_range_for(err.span)
-            .expect("error span outside range"),
-          format!("parse: Expected one of {:?}", err.expected),
-        ),
-        PellucidError::Desugar(desugar) => Diagnostic::new_simple(
-          newlines
-            .lsp_range_for(desugar.node.ptr.text_range().into())
-            .expect("error span outside range"),
-          match desugar.kind {
-            DesugarError::MissingSyntax(node) => format!("Expected node {node:?}"),
-            DesugarError::LetMissingBinding => "Let missing a variable".to_string(),
-            DesugarError::LetMissingExpr => "Let missing a rhs expr".to_string(),
-            DesugarError::InvalidInt(_) => "Expected an integer".to_string(),
-            DesugarError::FunMissingBinding => "Function missing a parameter".to_string(),
-            DesugarError::FunMissingExpr => "Function missing a body".to_string(),
-            DesugarError::VarMissingIdentifier => {
-              "Expected variable to contain an identifier token".to_string()
-            }
-            DesugarError::IntegerExprMissingInt => {
-              "Expected integer expr to contain an int token".to_string()
-            }
-            DesugarError::ApplicationMissingFun => "Application is missing a function".to_string(),
-            DesugarError::ApplicationMissingArg => "Applicaiton is missing a argument".to_string(),
-            DesugarError::ExprMissingBody => {
-              "Expected expression to have a body after let bindings.".to_string()
-            }
-            DesugarError::UnexpectedAtom(kind) => {
-              format!("Expecting an atom but found syntax {kind:?}.")
-            }
-          },
-        ),
-        PellucidError::Nameres(nameres) => {
-          let desugar = self.desugar_of(uri.clone());
-          let node_id = nameres.node;
-          let var = match nameres.kind {
-            NameResolutionError::UndefinedVar(_, var) => var,
-          };
-          Diagnostic::new_simple(
-            newlines
-              .lsp_range_for(desugar.ast_to_cst[&node_id].ptr.text_range().into())
-              .expect("error span outside range"),
-            format!("namres: Undefined variable {var}"),
-          )
-        }
-        PellucidError::Types(types) => {
-          let desugar = self.desugar_of(uri.clone());
-          let range = newlines
-            .lsp_range_for(desugar.ast_to_cst[&types.node].ptr.text_range().into())
-            .expect("error span outside range");
-
-          Diagnostic::new_simple(
-            range,
-            match types.mark {
-              TypeError::InfiniteType { type_var, ty } => format!(
-                "types: Tried to solve variable {} to infinite type {}",
-                prettyprint_ty(&Type::Var(type_var)),
-                prettyprint_ty(&ty)
-              ),
-              TypeError::UnexpectedFun {
-                expected_ty,
-                fun_ty,
-              } => format!(
-                "types: Expected a value of type {}, but found function of type {}",
-                prettyprint_ty(&expected_ty),
-                prettyprint_ty(&fun_ty)
-              ),
-              TypeError::AppExpectedFun {
-                inferred_ty,
-                expected_fun_ty,
-              } => format!(
-                "types: Expected this to be a function {} but it has type {}",
-                prettyprint_ty(&expected_fun_ty),
-                prettyprint_ty(&inferred_ty)
-              ),
-              TypeError::ExpectedUnify { checked, inferred } => format!(
-                "types: Tried to check this as type {} but it's inferred to have type {}",
-                prettyprint_ty(&checked),
-                prettyprint_ty(&inferred)
-              ),
-            },
-          )
-        }
-      })
-      .collect()
+      .chain(nameres.errors)
+      .chain(desugar.errors)
+      .chain(parse_errors)
   }
 
   pub fn ir_of(&self, uri: Uri) -> Option<LowerOut> {
@@ -960,12 +924,13 @@ impl QueryContext {
       let QueryKey::IrOf(uri) = key else {
         unreachable!()
       };
-      let types = this.types_of(uri.clone());
-      // If we have errors, lowering will crash
-      if !types.errors.is_empty() {
+      // If we have any errors, lowering will crash.
+      // Exit early to avoid lowering invalid IR.
+      for _ in this.errors(uri.clone()) {
         return None;
       }
 
+      let types = this.types_of(uri.clone());
       let lower = lowering_base::lower(types.ast, types.scheme);
 
       Some(lower)
@@ -1038,7 +1003,7 @@ impl QueryContext {
         );
         let mut defns = closures.closure_items;
         let mut main_item = closures.item;
-        // Just flagrantly cheating because we don't have real support for top level items.
+        // We're flagrantly cheating because we don't have real support for top level items.
         let main_var = closure_convert_base::VarId(usize::MAX);
         main_item.name = Some(closure_convert_base::Var {
           id: main_var,
@@ -1111,9 +1076,41 @@ impl<T: PartialEq> Find<T> for Ast<T> {
   }
 }
 
+pub(crate) fn zip_ast(left: Ast<String>, right: Ast<TypedVar>) -> Ast<(String, TypedVar)> {
+  match (left, right) {
+    (Ast::Var(left_id, a), Ast::Var(right_id, b)) if left_id == right_id => {
+      Ast::Var(left_id, (a, b))
+    }
+    // After desugaring, the only way we introdue a new hole is when we fail to resolve a
+    // name, so we handle that case explicilty here.
+    (Ast::Var(left_id, a), Ast::Hole(right_id, b)) if left_id == right_id => {
+      Ast::Hole(left_id, (a, b))
+    }
+    (Ast::Int(left_id, a), Ast::Int(right_id, _)) if left_id == right_id => Ast::Int(left_id, a),
+    (Ast::Fun(left_id, a_var, a_body), Ast::Fun(right_id, b_var, b_body))
+      if left_id == right_id =>
+    {
+      let body = zip_ast(*a_body, *b_body);
+      Ast::fun(left_id, (a_var, b_var), body)
+    }
+    (Ast::App(left_id, a_fun, a_arg), Ast::App(right_id, b_fun, b_arg)) if left_id == right_id => {
+      let fun = zip_ast(*a_fun, *b_fun);
+      let arg = zip_ast(*a_arg, *b_arg);
+      Ast::app(left_id, fun, arg)
+    }
+    (Ast::Hole(left_id, a_hole), Ast::Hole(right_id, b_hole)) if left_id == right_id => {
+      Ast::Hole(left_id, (a_hole, b_hole))
+    }
+    // Outside of our one case with Var, we should not see two different Ast nodes meet or
+    // an Ast node meet a Hole, so we error if that does arise.
+    (left, right) => unreachable!("{left:?} does not zip with {right:?}"),
+  }
+}
+
 mod prettyprint {
   use std::collections::HashMap;
 
+  use parser_base::Syntax;
   use pretty::{DocAllocator, DocBuilder, RcAllocator};
   use types_base::{Type, TypeVar};
 
@@ -1123,6 +1120,36 @@ mod prettyprint {
     let mut out = String::new();
     doc.render_fmt(80, &mut out).unwrap();
     out
+  }
+
+  pub fn prettyprint_expected_syntax(expected: &[Syntax]) -> String {
+    let expected: Vec<_> = expected.iter().copied().map(prettyprint_syntax).collect();
+    expected.join(", ")
+  }
+  fn prettyprint_syntax(syntax: Syntax) -> &'static str {
+    match syntax {
+      Syntax::LeftParen => "(",
+      Syntax::RightParen => ")",
+      Syntax::VerticalBar => "|",
+      Syntax::Equal => "=",
+      Syntax::Semicolon => ";",
+      Syntax::LetKw => "`let`",
+      Syntax::Identifier => "an identifier",
+      Syntax::Int => "an integer",
+      Syntax::Whitespaces => "whitespace",
+      Syntax::EndOfFile => "end of file",
+      Syntax::Error => "error",
+      Syntax::Fun => "a function",
+      Syntax::FunBinder => "a function parameter",
+      Syntax::App => "a function application",
+      Syntax::ParenthesizedExpr => "a parenthesized expression",
+      Syntax::Var => "a variable",
+      Syntax::Let => "a let expression",
+      Syntax::LetBinder => "a let binding",
+      Syntax::Expr => "an expression",
+      Syntax::IntegerExpr => "an integer",
+      Syntax::Program => "a program",
+    }
   }
 
   pub struct PrettyprintType {

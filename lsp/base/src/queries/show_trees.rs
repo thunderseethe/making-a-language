@@ -103,37 +103,6 @@ fn wasm_cst_to_json(
   })
 }
 
-fn zip_ast(left: Ast<String>, right: Ast<TypedVar>) -> Ast<(String, TypedVar)> {
-  match (left, right) {
-    (Ast::Var(left_id, a), Ast::Var(right_id, b)) if left_id == right_id => {
-      Ast::Var(left_id, (a, b))
-    }
-    // After desugaring, the only way we introdue a new hole is when we fail to resolve a
-    // name, so we handle that case explicilty here.
-    (Ast::Var(left_id, a), Ast::Hole(right_id, b)) if left_id == right_id => {
-      Ast::Hole(left_id, (a, b))
-    }
-    (Ast::Int(left_id, a), Ast::Int(right_id, _)) if left_id == right_id => Ast::Int(left_id, a),
-    (Ast::Fun(left_id, a_var, a_body), Ast::Fun(right_id, b_var, b_body))
-      if left_id == right_id =>
-    {
-      let body = zip_ast(*a_body, *b_body);
-      Ast::fun(left_id, (a_var, b_var), body)
-    }
-    (Ast::App(left_id, a_fun, a_arg), Ast::App(right_id, b_fun, b_arg)) if left_id == right_id => {
-      let fun = zip_ast(*a_fun, *b_fun);
-      let arg = zip_ast(*a_arg, *b_arg);
-      Ast::app(left_id, fun, arg)
-    }
-    (Ast::Hole(left_id, a_hole), Ast::Hole(right_id, b_hole)) if left_id == right_id => {
-      Ast::Hole(left_id, (a_hole, b_hole))
-    }
-    // Outside of our one case with Var, we should not see two different Ast nodes meet or
-    // an Ast node meet a Hole, so we error if that does arise.
-    (left, right) => unreachable!("{left:?} does not zip with {right:?}"),
-  }
-}
-
 fn ir_to_json(
   printer: &mut PrettyprintType,
   names: &HashMap<lowering_base::VarId, String>,

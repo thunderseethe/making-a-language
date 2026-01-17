@@ -16,10 +16,8 @@ import { jsonViewer } from './json_view';
 import 'normalize.css'
 import './style.css'
 
-const initialText = `let one = |s||z| s z;
-let add = |m||n||s||z| m s (n s z);
-let two = add one one;
-add two two`;
+const localStorageKey = "initialText";
+const initialText = getInitialText();
 const targetElement = document.querySelector('#editor')!
 
 const lsp_worker = new Worker(new URL("./worker", import.meta.url));
@@ -185,6 +183,11 @@ lsp_worker.onmessage = (e) => {
     showTrees(plugin);
     updateReplWasm(plugin);
   }
+
+  window.addEventListener('beforeunload', (_) => {
+    if (!storageAvailable()) return;
+    window.localStorage.setItem(localStorageKey, view.state.doc.toString());
+  });
 }
 
 function updateReplWasm(plugin: LSPPlugin): void {
@@ -253,7 +256,6 @@ function showTrees(plugin: LSPPlugin): void {
       treeViews.simple_ir.replaceChildren();
     }
     if (trees.wasm) {
-      console.log(trees.wasm);
       let ul = document.createElement("ul");
       ul.appendChild(wasmCstView(trees.wasm.cst));
       treeViews.wasm.replaceChildren(ul);
@@ -428,9 +430,6 @@ function wasmCstView(cst: WasmCst): HTMLElement {
       var children: WasmCst[] = cst.children ?? [];
       if (children[0].key == 'Word') {
         let tail = children.slice(1);
-        if (children[0].text == "func") {
-          console.log('tail', tail, cst);
-        }
         return nested(children[0].text ?? "missing text" , tail.map(wasmCstView));
       }
       return nested('List', children.map(wasmCstView));
@@ -476,7 +475,6 @@ function wasmCstView(cst: WasmCst): HTMLElement {
       return li;
     }
     default: {
-      console.log('error', cst);
       let li = document.createElement("li");
       li.innerHTML = `
         <div class="leaf">
@@ -547,3 +545,35 @@ function lspLintSource(view: EditorView): Promise<Diagnostic[]> {
   });
 }
 
+
+function getInitialText(): string {
+  if (storageAvailable()) {
+    let text = window.localStorage.getItem(localStorageKey);
+    if (text) {
+      return text;
+    }
+  }
+  return `let one = |s||z| s z;
+let add = |m||n||s||z| m s (n s z);
+let two = add one one;
+add two two`;
+}
+
+function storageAvailable(): boolean | undefined {
+  let storage;
+  try {
+    storage = window.localStorage;
+    const x = "__storage_test__";
+    storage.setItem(x, x);
+    storage.removeItem(x);
+    return true;
+  } catch (e) {
+    return (
+      e instanceof DOMException &&
+      e.name === "QuotaExceededError" &&
+      // acknowledge QuotaExceededError only if there's something already stored
+      storage &&
+      storage.length !== 0
+    );
+  }
+}
