@@ -77,13 +77,15 @@ impl TypeInference {
       Row::Unifier(var) => {
         let root = self.row_unification_table.find(var);
         match self.row_unification_table.probe_value(root) {
-          Some(Row::Unifier(_)) => panic!("Unexpected open row found as value of row unification table. This variable should've been `unify_var_var()`, not `unify_var_value()`"),
+          Some(Row::Unifier(_)) => panic!(
+            "Unexpected open row found as value of row unification table. This variable should've been `unify_var_var()`, not `unify_var_value()`"
+          ),
           Some(Row::Open(v)) => SubstOut::new(Row::Open(v)),
           Some(Row::Closed(row)) => self.substitute_closedrow(row).map(Row::Closed),
           None => {
-              let rowvar = self.rowvar_for_unifier(root);
-              SubstOut::new(Row::Open(rowvar)).with_unbound_row(rowvar)
-          },
+            let rowvar = self.rowvar_for_unifier(root);
+            SubstOut::new(Row::Open(rowvar)).with_unbound_row(rowvar)
+          }
         }
       }
       Row::Open(v) => SubstOut::new(Row::Open(v)),

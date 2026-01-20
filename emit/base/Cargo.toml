@@ -1,13 +1,13 @@
 [package]
 name = "emit-base"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 
 [dependencies]
 closure-convert-base.workspace = true
 lowering-base.workspace = true
 simplify-base.workspace = true
-wasm-encoder = "0.227"
+wasm-encoder = "0.235"
 im.workspace = true
 
 [dev-dependencies]
@@ -15,8 +15,8 @@ simplify-base.workspace = true
 expect-test.workspace = true
 types-base.workspace = true
 monomorph-base.workspace = true
-wasmprinter = "0.227"
-wasmparser = { version = "0.227", features = ["validate", "features"] }
-wasmtime = "31" 
+wasmprinter.workspace = true
+wasmparser.workspace = true
+wasmtime.workspace = true
 wat = "1.227.1"
 env_logger = "0.11.7"

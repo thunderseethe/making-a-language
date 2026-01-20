@@ -635,11 +635,11 @@ impl LowerSolvedEv<'_> {
     })
   }
 
-  fn left_enumerated_values(&self) -> impl Iterator<Item = (usize, Type)> {
+  fn left_enumerated_values(&self) -> impl Iterator<Item = (usize, Type)> + use<> {
     self.left_indices.clone().into_iter().zip(self.left.clone())
   }
 
-  fn right_enumerated_values(&self) -> impl Iterator<Item = (usize, Type)> {
+  fn right_enumerated_values(&self) -> impl Iterator<Item = (usize, Type)> + use<> {
     self
       .right_indices
       .clone()
@@ -1077,8 +1077,8 @@ fn pretty_string<'a>(
 mod tests {
   use super::*;
   use types_items::{
-    self as ast, builder::AstBuilder, type_infer, type_infer_with_items, Ast, ClosedRow, RowVar,
-    TypeScheme,
+    self as ast, Ast, ClosedRow, RowVar, TypeScheme, builder::AstBuilder, type_infer,
+    type_infer_with_items,
   };
 
   fn lower_test(ast: Ast<ast::Var>) -> (IR, Type) {

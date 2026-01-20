@@ -1,18 +1,25 @@
+[profile.release]
+opt-level = 'z'
+lto = true
+codegen-units = 1
+
 [workspace]
 members = [
-  "emit/base",
-  "closure_convert/base",
+  "types/base",
+  "types/items",
+  "types/rows",
   "lowering/base",
   "lowering/rows",
   "lowering/items",
   "monomorph/base",
   "simplify/base",
-  "types/base",
-  "types/items",
-  "types/rows", 
-  "parser/base",
+  "monomorph/base",
+  "closure_convert/base", 
+  "emit/base", 
+  "parser/base", 
   "desugar/base",
-  "name_resolution/base",
+  "name_resolution/base", 
+  "lsp/base",
 ]
 
 [workspace.package]
@@ -26,15 +33,36 @@ lowering-base = { path = "lowering/base" }
 simplify-base = { path = "simplify/base" }
 monomorph-base = { path = "monomorph/base" }
 closure-convert-base = { path = "closure_convert/base" }
+emit-base = { path = "emit/base" }
 parser-base = { path = "parser/base" }
 desugar-base = { path = "desugar/base" }
+name-resolution-base = { path = "name_resolution/base" }
+lsp-base = { path = "lsp/base" }
 ena = "0.14.2"
-im = "15.1"
-pretty_assertions = "1.4"
 expect-test = "1.5.1"
+im = "15.1"
+logos = "0.15"
+parking_lot = { version = "0.12" }
+pretty_assertions = "1.4"
 pretty = "0.12.3"
+rowan = "0.16"
+wasmtime = "34" 
+wasmprinter = "0.238"
+wasmparser = { version = "0.238", features = ["validate", "features"] }
+wast = "238"
 
 [package]
 name = "making-a-language"
 version = "0.1.0"
 edition.workspace = true
+
+[dependencies]
+parser-base.workspace = true
+desugar-base.workspace = true
+name-resolution-base.workspace = true
+types-base.workspace = true
+lowering-base.workspace = true
+simplify-base.workspace = true
+monomorph-base.workspace = true
+closure-convert-base.workspace = true
+emit-base.workspace = true

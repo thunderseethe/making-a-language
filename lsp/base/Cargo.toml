@@ -1,0 +1,36 @@
+[package]
+name = "lsp-base"
+version = "0.1.0"
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+types-base.workspace = true
+lowering-base.workspace = true
+simplify-base.workspace = true
+monomorph-base.workspace = true
+closure-convert-base.workspace = true
+emit-base.workspace = true
+parser-base.workspace = true
+desugar-base.workspace = true
+name-resolution-base.workspace = true
+
+wasm-bindgen = "0.2.100"
+console_error_panic_hook = "0.1.7"
+tower-lsp-server = { version = "0.22", default-features = false, features = ["runtime-agnostic"] }
+wasm-bindgen-futures = "0.4.50"
+wasm-streams = "0.4.2"
+web-sys = { version = "0.3.77", features = ["console"] }
+dashmap = "7.0.0-rc2"
+parking_lot.workspace = true
+petgraph = "0.8.2"
+serde_json = "1.0.142"
+pretty.workspace = true
+rowan.workspace = true
+wasmprinter.workspace = true
+wasmparser.workspace = true
+wast.workspace = true
+logos.workspace = true
+

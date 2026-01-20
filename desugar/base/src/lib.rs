@@ -122,7 +122,8 @@ impl Desugar {
       .and_then(|var| var.first_child_or_token_by_kind(&|kind| kind == Syntax::Identifier))
       .ok_or(DesugarError::LetMissingBinding)?;
 
-    let ast = match children.next().filter(|expr| expr.kind() == Syntax::Expr) {
+    let ast = match children.next()
+        .filter(|expr| expr.kind() == Syntax::Expr) {
       Some(expr) => self.desugar_expr(expr),
       None => self.hole(&bind, DesugarError::LetMissingExpr),
     };

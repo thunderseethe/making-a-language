@@ -42,7 +42,7 @@ impl NameResolution {
           let var = self.supply.supply();
           Ast::Hole(id, var)
         }
-      },
+      }
       Ast::Hole(id, name) => {
         let var = self.supply.supply();
         self.names.insert(var, name.clone());

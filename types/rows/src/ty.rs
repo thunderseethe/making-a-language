@@ -2,8 +2,8 @@ use std::collections::BTreeSet;
 
 use ena::unify::{EqUnifyValue, UnifyKey};
 
-use crate::ast::Label;
 use crate::Evidence;
+use crate::ast::Label;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClosedRow {

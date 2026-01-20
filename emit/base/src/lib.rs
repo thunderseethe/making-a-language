@@ -1,11 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Index;
 
-use closure_convert_base::{Item, ItemId, Type, Var, VarId, IR};
+use closure_convert_base::{IR, Item, ItemId, Type, Var, VarId};
 use wasm_encoder::{
   AbstractHeapType, CodeSection, CompositeInnerType, CompositeType, ExportKind, ExportSection,
-  FieldType, FuncType, Function, FunctionSection, HeapType, Instruction, Module, RefType,
-  StorageType, StructType, SubType, TypeSection, ValType,
+  FieldType, FuncType, Function, FunctionSection, HeapType, IndirectNameMap, Instruction,
+  Module, NameMap, NameSection, RefType, StorageType, StructType,
+  SubType, TypeSection, ValType,
 };
 
 #[derive(Eq, Hash, PartialEq)]
@@ -202,8 +203,19 @@ struct EmitWasm {
 }
 
 impl EmitWasm {
-  fn emit_item(&mut self, item: Item) -> Function {
-    let (inss, local_tys) = self.emit_body(&item.params, item.body);
+  fn emit_item(&mut self, item: Item, names: &HashMap<VarId, String>) -> (Function, NameMap) {
+    let (inss, local_tys, locals) = self.emit_body(&item.params, item.body);
+
+    let mut ordered_local_names = BTreeMap::default();
+    for (var_id, local) in locals {
+      if let Some(name) = names.get(&var_id) {
+        ordered_local_names.insert(local, name);
+      }
+    }
+    let mut name_map = NameMap::default();
+    for (local, name) in ordered_local_names.into_iter() {
+      name_map.append(local, name);
+    }
 
     let mut function = Function::new_with_locals_types(local_tys);
     for ins in inss {
@@ -211,10 +223,14 @@ impl EmitWasm {
     }
     function.instruction(&Instruction::Return);
     function.instruction(&Instruction::End);
-    function
+    (function, name_map)
   }
 
-  fn emit_body(&mut self, params: &[Var], body: IR) -> (Vec<Instruction<'static>>, Vec<ValType>) {
+  fn emit_body(
+    &mut self,
+    params: &[Var],
+    body: IR,
+  ) -> (Vec<Instruction<'static>>, Vec<ValType>, HashMap<VarId, u32>) {
     let mut locals = EmitLocals {
       next_local: 0,
       local_tys: vec![],
@@ -225,7 +241,7 @@ impl EmitWasm {
     }
     let mut inss: Vec<Instruction> = vec![];
 
-    if let Type::ClosureEnv(closure, env) = &params[0].ty {
+    if let Some(Type::ClosureEnv(closure, env)) = params.first().map(|param| &param.ty) {
       let closure_env_index = self.types.emit_closure_env_index(closure, env);
       let casted_env_local = locals.anon_local(closure_env_index.as_val_ty());
       inss.extend([
@@ -239,7 +255,7 @@ impl EmitWasm {
 
     self.emit_ir(body, &mut locals, &mut inss);
 
-    (inss, locals.local_tys)
+    (inss, locals.local_tys, locals.locals)
   }
 
   fn emit_ir(&mut self, body: IR, locals: &mut EmitLocals, inss: &mut Vec<Instruction>) {
@@ -307,60 +323,87 @@ impl EmitWasm {
   }
 }
 
-pub fn emit_wasm(items: Vec<(ItemId, Item)>) -> Vec<u8> {
+pub fn emit_wasm(
+  items: Vec<(ItemId, Item)>,
+  names: HashMap<closure_convert_base::VarId, String>,
+) -> Vec<u8> {
   let mut types = EmitType::default();
   let mut func = FunctionSection::new();
   let mut export = ExportSection::new();
 
+  let mut seen_names: HashSet<String> = HashSet::default();
+  let mut func_names = NameMap::default();
   let functions: HashMap<ItemId, u32> = items
     .iter()
     .map(|(item_id, item)| {
       let func_index = func.len();
       let type_index = types.emit_item_ty(item);
       func.function(type_index);
-      export.export(&format!("func{}", item_id.0), ExportKind::Func, func_index);
+      let export_name = if let Some(name) = item.name.as_ref().and_then(|var| names.get(&var.id)) {
+        func_names.append(func_index, name);
+        let new_entry = seen_names.insert(name.clone());
+        if new_entry {
+          name.clone()
+        } else {
+          // We can be confident item id is unique so attach that to our name if it's already used.
+          format!("{}{}", name, item_id.0)
+        }
+      } else {
+        format!("__closure{func_index}")
+      };
+      export.export(&export_name, ExportKind::Func, func_index);
       (*item_id, func_index)
     })
     .collect();
 
   let mut emitter = EmitWasm { types, functions };
+  let mut local_names = IndirectNameMap::default();
   let mut code = CodeSection::default();
   for (_, item) in items {
-    code.function(&emitter.emit_item(item));
+    let (function, name_map) = emitter.emit_item(item, &names);
+    let idx = code.len();
+    code.function(&function);
+    local_names.append(idx, &name_map);
   }
 
+  let mut name_section = NameSection::default();
+  name_section.functions(&func_names);
+  name_section.locals(&local_names);
   let mut module = Module::default();
   module
     .section(&emitter.types.into_type_section())
     .section(&func)
     .section(&export)
-    .section(&code);
+    .section(&code)
+    .section(&name_section);
 
   module.finish()
 }
 
 #[cfg(test)]
 mod tests {
+  use std::collections::HashMap;
+
   use crate::emit_wasm;
 
-  use closure_convert_base::{closure_convert, ItemId};
+  use closure_convert_base::{ItemId, closure_convert};
   use expect_test::expect;
   use lowering_base::lower;
   use monomorph_base::trivial_monomorph;
   use simplify_base::simplify;
   use types_base::{
-    self as ast,
-    builder::{make_vars, AstBuilder},
-    type_infer, Ast,
+    self as ast, Ast,
+    builder::{AstBuilder, make_vars},
+    type_infer,
   };
   use wasmparser::{Validator, WasmFeatures};
   use wasmprinter::PrintFmtWrite;
   use wasmtime::{Config, Engine, Linker, Module, Store};
 
   fn wasm_module_of(ast: Ast<ast::Var>) -> Vec<u8> {
-    let out = type_infer(ast);
-    let (ir, _) = lower(out.ast, out.scheme);
-    let out = closure_convert(trivial_monomorph(simplify(ir)));
+    let types = type_infer(ast);
+    let lower = lower(types.ast, types.scheme);
+    let out = closure_convert(trivial_monomorph(simplify(lower.ir)));
 
     let main_defn = ItemId(
       out
@@ -372,7 +415,7 @@ mod tests {
     let mut defns = out.closure_items;
     defns.insert(main_defn, out.item);
 
-    emit_wasm(defns.into_iter().collect())
+    emit_wasm(defns.into_iter().collect(), HashMap::default())
   }
 
   #[test]
@@ -414,9 +457,9 @@ mod tests {
           (type (;7;) (sub (struct (field (ref 6)))))
           (type (;8;) (func (param (ref 3) (ref 7)) (result i32)))
           (type (;9;) (sub final 1 (struct (field (ref 0)) (field (ref 3)))))
-          (export "func0" (func 0))
-          (export "func1" (func 1))
-          (export "func2" (func 2))
+          (export "__closure0" (func 0))
+          (export "__closure1" (func 1))
+          (export "__closure2" (func 2))
           (func (;0;) (type 0) (param (ref struct) i32) (result i32)
             (local (ref 9) (ref 3) (ref 3) (ref 1))
             (local.set 2
@@ -532,7 +575,7 @@ mod tests {
           (type (;2;) (func (param (ref struct) i32) (result (ref 1))))
           (type (;3;) (sub (struct (field (ref 2)))))
           (type (;4;) (func (param (ref 3) i32 i32) (result i32)))
-          (export "func0" (func 0))
+          (export "__closure0" (func 0))
           (func (;0;) (type 4) (param (ref 3) i32 i32) (result i32)
             (local (ref 3) (ref 3) (ref 1) (ref 1) (ref 3) (ref 1))
             (return
@@ -600,7 +643,7 @@ mod tests {
           (type $func0-func (;4;) (func (param (ref 3) i32 i32) (result i32)))
           (type $add-inner-env (sub final $add-inner-clos (struct (field $code (ref $add-inner-func)) (field $a i32))))
           (type $main-func (func (result i32)))
-          (import "test" "func0" (func $func0 (type $func0-func)))
+          (import "test" "__closure0" (func $func0 (type $func0-func)))
           (export "main" (func $main))
           (export "add" (func $add))
           (export "add-inner" (func $add-inner))
@@ -693,9 +736,9 @@ mod tests {
           (type (;4;) (func (param (ref 3)) (result i32)))
           (type (;5;) (sub final 1 (struct (field (ref 0)) (field (ref 3)) (field i32))))
           (type (;6;) (sub final 3 (struct (field (ref 2)) (field (ref 3)))))
-          (export "func0" (func 0))
-          (export "func1" (func 1))
-          (export "func2" (func 2))
+          (export "__closure0" (func 0))
+          (export "__closure1" (func 1))
+          (export "__closure2" (func 2))
           (func (;0;) (type 0) (param (ref struct) i32) (result i32)
             (local (ref 5) i32 (ref 3) (ref 3) (ref 1))
             (local.set 2
@@ -819,7 +862,7 @@ mod tests {
           (type $func0-func (;4;) (func (param (ref 3)) (result i32)))
           (type $add-inner-env (sub final $add-inner-clos (struct (field $code (ref $add-inner-func)) (field $a i32))))
           (type $main-func (func (result i32)))
-          (import "test" "func2" (func $func0 (type $func0-func)))
+          (import "test" "__closure2" (func $func0 (type $func0-func)))
           (export "main" (func $main))
           (export "add" (func $add))
           (export "add-inner" (func $add-inner))
@@ -896,7 +939,7 @@ mod tests {
           (type (;2;) (func (param (ref struct) i32) (result (ref 1))))
           (type (;3;) (sub (struct (field (ref 2)))))
           (type (;4;) (func (param (ref 3)) (result i32)))
-          (export "func0" (func 0))
+          (export "__closure0" (func 0))
           (func (;0;) (type 4) (param (ref 3)) (result i32)
             (local (ref 3) (ref 1) (ref 3) (ref 1) (ref 1) (ref 1))
             (local.set 2
@@ -961,7 +1004,7 @@ mod tests {
           (type $func0-func (;4;) (func (param (ref 3)) (result i32)))
           (type $add-inner-env (sub final $add-inner-clos (struct (field $code (ref $add-inner-func)) (field $a i32))))
           (type $main-func (func (result i32)))
-          (import "test" "func0" (func $func0 (type $func0-func)))
+          (import "test" "__closure0" (func $func0 (type $func0-func)))
           (export "main" (func $main))
           (export "add" (func $add))
           (export "add-inner" (func $add-inner))

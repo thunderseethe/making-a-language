@@ -1,6 +1,6 @@
 use pretty::{DocAllocator, DocBuilder, Pretty};
 
-use crate::{Item, ItemId, Type, Var, IR};
+use crate::{IR, Item, ItemId, Type, Var};
 
 impl<'a, D> Pretty<'a, D> for ItemId
 where
