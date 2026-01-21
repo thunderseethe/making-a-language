@@ -4,9 +4,8 @@ use std::ops::Index;
 use closure_convert_base::{IR, Item, ItemId, Type, Var, VarId};
 use wasm_encoder::{
   AbstractHeapType, CodeSection, CompositeInnerType, CompositeType, ExportKind, ExportSection,
-  FieldType, FuncType, Function, FunctionSection, HeapType, IndirectNameMap, Instruction,
-  Module, NameMap, NameSection, RefType, StorageType, StructType,
-  SubType, TypeSection, ValType,
+  FieldType, FuncType, Function, FunctionSection, HeapType, IndirectNameMap, Instruction, Module,
+  NameMap, NameSection, RefType, StorageType, StructType, SubType, TypeSection, ValType,
 };
 
 #[derive(Eq, Hash, PartialEq)]

@@ -45,10 +45,10 @@ impl QueryContext {
             .expect("Failed to print wat from wasm");
           let mut html = PrintHtmlWrite::default();
           wasmprinter::Config::new()
-              .fold_instructions(true)
-              .indent_text("    ")
-              .print(&wasm, &mut html)
-              .expect("Failed to print wat from wasm");
+            .fold_instructions(true)
+            .indent_text("    ")
+            .print(&wasm, &mut html)
+            .expect("Failed to print wat from wasm");
           let parse = wasm_parser::parse(&out.0).syntax();
           json!({
             "cst": wasm_cst_to_json(parse),

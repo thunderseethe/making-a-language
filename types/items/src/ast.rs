@@ -1,5 +1,5 @@
-use crate::ty::{Row, Type};
 use crate::Evidence;
+use crate::ty::{Row, Type};
 
 #[derive(PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Debug, Hash)]
 pub struct Var(pub usize);

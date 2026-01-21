@@ -31,7 +31,7 @@ use wasm_bindgen::prelude::*;
 use wasm_streams::{ReadableStream, WritableStream};
 
 mod queries;
-use queries::{QueryContext, Database, graph::DepGraph};
+use queries::{Database, QueryContext, graph::DepGraph};
 
 pub enum CompilerError {
   Desugar(DesugarError),

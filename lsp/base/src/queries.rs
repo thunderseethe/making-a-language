@@ -802,7 +802,7 @@ impl QueryContext {
       &self.db.diagnostics_query,
       |this, key| {
         let QueryKey::DiagnosticsOf(uri) = key else {
-            unreachable!()
+          unreachable!()
         };
         let newlines = this.newlines_of(uri.clone());
         this
@@ -903,7 +903,8 @@ impl QueryContext {
             }
           })
           .collect()
-      })
+      },
+    )
   }
 
   pub fn errors(&self, uri: Uri) -> impl Iterator<Item = PellucidError> {

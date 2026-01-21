@@ -453,10 +453,8 @@ impl Simplifier {
       Occurrence::OnceInFun => ir.is_value() && self.some_benefit(ir, in_scope, ctx),
       Occurrence::Many => {
         let small_enough = ir.size() <= self.inline_size_threshold;
-        ir.is_value()
-          && small_enough
-          && self.some_benefit(ir, in_scope, ctx)
-      },
+        ir.is_value() && small_enough && self.some_benefit(ir, in_scope, ctx)
+      }
     }
   }
 
