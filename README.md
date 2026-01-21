@@ -28,3 +28,5 @@ The stages in the compiler:
   * [base](/desugar/base) - Desugaring for the base language
 * [name_resolution](/name_resolution) - Name resolution
   * [base](/name_resolution/base) - Name resolution for the base language
+* [lsp](/lsp) - Language Server Protocol
+  * [base](/lsp/base) - Implement a language server for the base language
