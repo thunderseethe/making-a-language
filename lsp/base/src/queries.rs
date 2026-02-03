@@ -330,7 +330,7 @@ impl QueryContext {
     }
   }
 
-  fn try_mark_green(&self, key: QueryKey) -> Color {
+  fn try_mark_green(&self, key: QueryKey, parent_rev: usize) -> Color {
     let revision = self.db.revision.load(Ordering::SeqCst);
     // If we have no dependencies in the graph, assume we need to run the query.
     let Some(deps) = self.dep_graph.dependencies(&key) else {
@@ -338,10 +338,12 @@ impl QueryContext {
     };
     for dep in deps {
       match self.db.colors.get(&dep) {
-        Some((Color::Green, rev)) if revision == rev => continue,
+        Some((Color::Green, rev)) if parent_rev >= rev => continue,
+        Some((Color::Green, rev)) if parent_rev < rev => return Color::Red,
         Some((Color::Red, _)) => return Color::Red,
-        _ => {
-          if self.try_mark_green(dep.clone()) != Color::Green {
+        color => {
+          let rev = color.map(|(_, rev)| rev).unwrap_or(parent_rev);
+          if self.try_mark_green(dep.clone(), rev) != Color::Green {
             self.run_query(dep.clone());
             // Because we just ran the query we can be sure the revision is up to date.
             match self.db.colors.get(&dep) {
@@ -388,12 +390,7 @@ impl QueryContext {
     let Some((_, rev)) = self.db.colors.get(&key) else {
       return update_value(key);
     };
-    // Our query is outdated
-    if rev < revision {
-      return update_value(key);
-    }
-
-    let color = self.try_mark_green(key.clone());
+    let color = self.try_mark_green(key.clone(), rev);
     match color {
       Color::Green => cache
         .get(&key)
