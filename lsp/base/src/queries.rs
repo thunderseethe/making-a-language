@@ -26,28 +26,10 @@ use types_base::{Ast, NodeId, Type, TypeError, TypeScheme, TypedVar, Var};
 use self::graph::DepGraph;
 use self::prettyprint::{PrettyprintType, prettyprint_expected_syntax, prettyprint_ty};
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-enum Color {
-  Red,
-  Green,
-}
-
-#[derive(Default, Debug)]
-struct ColorMap {
-  storage: DashMap<QueryKey, (Color, usize)>,
-}
-impl ColorMap {
-  fn get(&self, key: &QueryKey) -> Option<(Color, usize)> {
-    self.storage.get(key).map(|r| *r.value())
-  }
-
-  fn mark_red(&self, key: QueryKey, revision: usize) -> Option<(Color, usize)> {
-    self.storage.insert(key, (Color::Red, revision))
-  }
-
-  fn mark_green(&self, key: QueryKey, reivision: usize) -> Option<(Color, usize)> {
-    self.storage.insert(key, (Color::Green, reivision))
-  }
+#[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+struct Revision {
+  verified_at: usize,
+  changed_at: usize,
 }
 
 pub(crate) mod graph {
@@ -86,6 +68,18 @@ pub(crate) mod graph {
       }
       Some(nodes)
     }
+
+    pub(crate) fn clear_dependencies(&self, key: &QueryKey) {
+      let Some(index) = self.indices.get(key) else {
+        // If we have no node for this key, dependencies are clear.
+        return;
+      };
+      let mut graph = self.graph.write();
+      let mut deps = graph.neighbors(*index).detach();
+      while let Some(edge) = deps.next_edge(&graph) {
+        graph.remove_edge(edge);
+      }
+    }
   }
 }
 
@@ -111,6 +105,12 @@ pub(crate) enum QueryKey {
   DefinitionOf(Uri, Position),
   ReferencesOf(Uri, Position),
   ShowTreesOf(Uri),
+}
+
+impl QueryKey {
+  fn is_input(&self) -> bool {
+    matches!(self, QueryKey::ContentOf(_))
+  }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,7 +154,7 @@ pub struct PellucidNameResError {
 
 #[derive(Default, Debug)]
 pub struct Database {
-  colors: ColorMap,
+  revisions: DashMap<QueryKey, Revision>,
   revision: AtomicUsize,
   // Query caches
   content_input: DashMap<QueryKey, String>,
@@ -180,11 +180,21 @@ pub struct Database {
 }
 
 impl Database {
+  pub fn new() -> Self {
+    Self {
+      // We initialize our revision for each query at 0, so starting our main revision at 1 forces
+      // all queries to at least verify their cached values.
+      revision: AtomicUsize::new(1),
+      ..Default::default()
+    }
+  }
   pub fn set_content(&self, uri: Uri, content: String) {
     let key = QueryKey::ContentOf(uri);
     self.content_input.insert(key.clone(), content);
     let old_revision = self.revision.fetch_add(1, Ordering::SeqCst);
-    self.colors.mark_red(key, old_revision + 1);
+    let mut revs = self.revisions.entry(key).or_default();
+    revs.changed_at = old_revision + 1;
+    revs.verified_at = old_revision + 1;
   }
 }
 
@@ -267,99 +277,27 @@ impl QueryContext {
     }
   }
 
-  fn run_query(&self, key: QueryKey) {
-    match key {
-      QueryKey::ContentOf(_) => { /* this is input query, so running it does nothing. */ }
-      QueryKey::CstOf(uri) => {
-        self.cst_of(uri);
-      }
-      QueryKey::NewlinesOf(uri) => {
-        self.newlines_of(uri);
-      }
-      QueryKey::DesugarOf(uri) => {
-        let _ = self.desugar_of(uri);
-      }
-      QueryKey::NameresolveOf(uri) => {
-        let _ = self.nameresolve_of(uri);
-      }
-      QueryKey::TypesOf(uri) => {
-        let _ = self.types_of(uri);
-      }
-      QueryKey::AstNodeOf(uri, node) => {
-        let _ = self.ast_node_of(uri, node);
-      }
-      QueryKey::HoverOf(uri, range) => {
-        let _ = self.hover_of(uri, range);
-      }
-      QueryKey::NodeStartingAt(uri, cursor) => {
-        let _ = self.syntax_node_starting_at(uri, cursor);
-      }
-      QueryKey::CompletionOf(uri, cursor) => {
-        let _ = self.completion_of(uri, cursor);
-      }
-      QueryKey::DefinitionOf(uri, cursor) => {
-        let _ = self.definition_of(uri, cursor);
-      }
-      QueryKey::ReferencesOf(uri, cursor) => {
-        let _ = self.references_of(uri, cursor);
-      }
-      QueryKey::ScopeOf(uri, cursor) => {
-        let _ = self.scope_at(uri, cursor);
-      }
-      QueryKey::ShowTreesOf(uri) => {
-        let _ = self.show_trees_of(uri);
-      }
-      QueryKey::IrOf(uri) => {
-        let _ = self.ir_of(uri);
-      }
-      QueryKey::SimpleIrOf(uri) => {
-        let _ = self.simple_ir_of(uri);
-      }
-      QueryKey::MonomorphOf(uri) => {
-        let _ = self.monomorph_of(uri);
-      }
-      QueryKey::ClosureConvertOf(uri) => {
-        let _ = self.closure_convert_of(uri);
-      }
-      QueryKey::WasmOf(uri) => {
-        let _ = self.wasm_of(uri);
-      }
-      QueryKey::DiagnosticsOf(uri) => {
-        let _ = self.diagnostics_of(uri);
-      }
-    }
-  }
-
-  fn try_mark_green(&self, key: QueryKey) -> Color {
-    let revision = self.db.revision.load(Ordering::SeqCst);
-    // If we have no dependencies in the graph, assume we need to run the query.
-    let Some(deps) = self.dep_graph.dependencies(&key) else {
-      return Color::Red;
+  fn maybe_changed_after(&self, key: QueryKey, revisions: Revision) -> bool {
+    let current_revision = self.db.revision.load(Ordering::SeqCst);
+    let Some(revs) = self.db.revisions.get(&key).map(|revs| *revs) else {
+        return true;
     };
-    let Some((_, parent_rev)) = self.db.colors.get(&key) else {
-      return Color::Red;
+    if key.is_input() || revisions.verified_at == current_revision {
+      return revs.changed_at > revisions.verified_at;
+    }
+    let Some(deps) = self.dep_graph.dependencies(&key) else {
+      return true;
     };
     for dep in deps {
-      match self.db.colors.get(&dep) {
-        Some((Color::Green, rev)) if parent_rev >= rev => continue,
-        Some((Color::Green, rev)) if parent_rev < rev => return Color::Red,
-        Some((Color::Red, _)) => return Color::Red,
-        color => {
-          if self.try_mark_green(dep.clone()) != Color::Green {
-            self.run_query(dep.clone());
-            // Because we just ran the query we can be sure the revision is up to date.
-            match self.db.colors.get(&dep) {
-              Some((Color::Green, _)) => continue,
-              Some((Color::Red, _)) => return Color::Red,
-              None => unreachable!("color"),
-            }
-          }
-        }
+      if self.maybe_changed_after(dep.clone(), revisions) {
+        return true;
       }
     }
-    // If we marked all dependencies green, mark this node green.
-    self.db.colors.mark_green(key, revision);
-    Color::Green
+    // Write out our updated verified_at.
+    self.db.revisions.get_mut(&key)
+        .expect("We set this at the top of the function")
+        .verified_at = current_revision;
+    return revs.changed_at > revisions.verified_at;
   }
 
   fn query<V: PartialEq + Clone>(
@@ -369,40 +307,43 @@ impl QueryContext {
     producer: impl FnOnce(&Self, &QueryKey) -> V,
   ) -> V {
     let revision = self.db.revision.load(Ordering::SeqCst);
-    let update_value = |key: QueryKey| {
-      if let Some(parent) = &self.parent {
-        self.dep_graph.add_dependency(parent.clone(), key.clone());
-      }
-      let value = producer(
-        &QueryContext {
-          parent: Some(key.clone()),
-          db: self.db.clone(),
-          dep_graph: self.dep_graph.clone(),
-        },
-        &key,
-      );
-      let old = cache.insert(key.clone(), value.clone());
-      if old.is_none_or(|old| old == value) {
-        self.db.colors.mark_green(key, revision);
-      } else {
-        self.db.colors.mark_red(key, revision);
-      }
-      value
-    };
-    let color = self.try_mark_green(key.clone());
-    match color {
-      Color::Green => cache
+    // If we verify, we can return our cached value immediately
+    let revs = self.db.revisions.get(&key).map(|revs| *revs);
+    if revs.is_some_and(|revs| !self.maybe_changed_after(key.clone(), revs)) {
+      let value = cache
         .get(&key)
         .unwrap_or_else(|| {
           panic!(
-            "Green query {:?} missing value in cache\n{:?}",
-            key, self.db.colors
+            "Verified query {:?} missing value in cache\n{:?}",
+            key, self.db.revisions
           )
         })
         .value()
-        .clone(),
-      Color::Red => update_value(key),
+        .clone();
+      //let mut revs = self.db.colors.entry(key).or_default();
+      //revs.verified_at = revision;
+      return value;
     }
+    // We've failed to use a cached value, we need to update our value.
+    self.dep_graph.clear_dependencies(&key);
+    if let Some(parent) = &self.parent {
+      self.dep_graph.add_dependency(parent.clone(), key.clone());
+    }
+    let value = producer(
+      &QueryContext {
+        parent: Some(key.clone()),
+        db: self.db.clone(),
+        dep_graph: self.dep_graph.clone(),
+      },
+      &key,
+    );
+    let old = cache.insert(key.clone(), value.clone());
+    let mut query_revs = self.db.revisions.entry(key).or_default();
+    query_revs.verified_at = revision;
+    if old.is_none_or(|old| old != value) {
+      query_revs.changed_at = revision;
+    }
+    value
   }
 }
 
@@ -421,10 +362,6 @@ impl QueryContext {
     if let Some(parent) = &self.parent {
       self.dep_graph.add_dependency(parent.clone(), key.clone());
     }
-    self
-      .db
-      .colors
-      .mark_green(key, self.db.revision.load(Ordering::SeqCst));
     self
       .db
       .content_input

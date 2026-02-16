@@ -162,7 +162,7 @@ impl PellucidLsp {
   fn new(client: Client) -> Self {
     Self {
       client,
-      database: Arc::new(Database::default()),
+      database: Arc::new(Database::new()),
       dep_graph: Arc::new(DepGraph::default()),
     }
   }
