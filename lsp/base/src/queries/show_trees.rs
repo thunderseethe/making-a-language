@@ -7,7 +7,10 @@ impl QueryContext {
     self.query(
       QueryKey::ShowTreesOf(uri.clone()),
       &self.db.show_trees_query,
-      |this, _| {
+      |this, key| {
+        let QueryKey::ShowTreesOf(uri) = key else {
+            unreachable!()
+        };
         let (green, _) = this.cst_of(uri.clone());
         let desugar = this.desugar_of(uri.clone());
         let types = this.types_of(uri.clone());

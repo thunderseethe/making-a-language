@@ -277,19 +277,19 @@ impl QueryContext {
     }
   }
 
-  fn maybe_changed_after(&self, key: QueryKey, revisions: Revision) -> bool {
+  fn maybe_changed_after(&self, key: QueryKey, revision: usize) -> bool {
     let current_revision = self.db.revision.load(Ordering::SeqCst);
     let Some(revs) = self.db.revisions.get(&key).map(|revs| *revs) else {
         return true;
     };
-    if key.is_input() || revisions.verified_at == current_revision {
-      return revs.changed_at > revisions.verified_at;
+    if key.is_input() || revs.verified_at == current_revision {
+      return revs.changed_at > revision;
     }
     let Some(deps) = self.dep_graph.dependencies(&key) else {
       return true;
     };
     for dep in deps {
-      if self.maybe_changed_after(dep.clone(), revisions) {
+      if self.maybe_changed_after(dep.clone(), revision) {
         return true;
       }
     }
@@ -297,7 +297,7 @@ impl QueryContext {
     self.db.revisions.get_mut(&key)
         .expect("We set this at the top of the function")
         .verified_at = current_revision;
-    return revs.changed_at > revisions.verified_at;
+    return revs.changed_at > revision;
   }
 
   fn query<V: PartialEq + Clone>(
@@ -306,11 +306,14 @@ impl QueryContext {
     cache: &DashMap<QueryKey, V>,
     producer: impl FnOnce(&Self, &QueryKey) -> V,
   ) -> V {
+    if let Some(parent) = &self.parent {
+      self.dep_graph.add_dependency(parent.clone(), key.clone());
+    }
     let revision = self.db.revision.load(Ordering::SeqCst);
     // If we verify, we can return our cached value immediately
-    let revs = self.db.revisions.get(&key).map(|revs| *revs);
-    if revs.is_some_and(|revs| !self.maybe_changed_after(key.clone(), revs)) {
-      let value = cache
+    let verified_at = self.db.revisions.get(&key).map(|revs| revs.verified_at);
+    if verified_at.is_some_and(|verified_at| !self.maybe_changed_after(key.clone(), verified_at)) {
+      return cache
         .get(&key)
         .unwrap_or_else(|| {
           panic!(
@@ -320,15 +323,9 @@ impl QueryContext {
         })
         .value()
         .clone();
-      //let mut revs = self.db.colors.entry(key).or_default();
-      //revs.verified_at = revision;
-      return value;
     }
     // We've failed to use a cached value, we need to update our value.
     self.dep_graph.clear_dependencies(&key);
-    if let Some(parent) = &self.parent {
-      self.dep_graph.add_dependency(parent.clone(), key.clone());
-    }
     let value = producer(
       &QueryContext {
         parent: Some(key.clone()),
